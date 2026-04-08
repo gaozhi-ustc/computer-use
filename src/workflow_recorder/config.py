@@ -34,6 +34,7 @@ class PrivacyConfig(BaseModel):
 
 class AnalysisConfig(BaseModel):
     openai_api_key: str = ""
+    base_url: str = ""  # Custom API endpoint (e.g. proxy); empty = default OpenAI
     model: str = "gpt-4o"
     detail: str = "low"
     max_tokens: int = 500
@@ -98,10 +99,28 @@ def _interpolate(obj):
     return obj
 
 
+def _load_toml(path: str | Path) -> dict:
+    """Load a TOML file and return as dict."""
+    import sys
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        try:
+            import tomli as tomllib
+        except ImportError:
+            raise ImportError("Install 'tomli' for Python < 3.11 TOML support")
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
 def load_config(path: Optional[str | Path] = None) -> AppConfig:
-    """Load configuration from a YAML file, falling back to defaults."""
+    """Load configuration from a YAML or TOML file, falling back to defaults."""
     if path is None:
         return AppConfig()
-    with open(path) as f:
-        data = yaml.safe_load(f) or {}
+    path = Path(path)
+    if path.suffix in (".toml",):
+        data = _load_toml(path)
+    else:
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
     return AppConfig(**data)

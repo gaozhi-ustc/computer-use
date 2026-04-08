@@ -30,3 +30,10 @@ workflow-recorder = "workflow_recorder.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/workflow_recorder"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: requires GPT API access via config.test.toml",
+    "e2e: end-to-end pipeline test (capture + analysis + output)",
+]

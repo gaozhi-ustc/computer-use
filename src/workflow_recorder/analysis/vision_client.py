@@ -23,7 +23,10 @@ class VisionClient:
 
     def __init__(self, config: AnalysisConfig):
         self.config = config
-        self.client = OpenAI(api_key=config.openai_api_key)
+        client_kwargs: dict = {"api_key": config.openai_api_key}
+        if config.base_url:
+            client_kwargs["base_url"] = config.base_url
+        self.client = OpenAI(**client_kwargs)
         self._last_call_time = 0.0
         self._min_interval = 60.0 / config.rate_limit_rpm if config.rate_limit_rpm > 0 else 0
 
@@ -71,6 +74,8 @@ class VisionClient:
         with Image.open(image_path) as img:
             width, height = img.size
 
+        json_reminder = "\n\nIMPORTANT: You MUST respond with ONLY a valid JSON object as specified in the system prompt. No markdown fences, no explanation, just the raw JSON."
+
         if window_context:
             user_text = USER_PROMPT_TEMPLATE.format(
                 process_name=window_context.process_name,
@@ -79,12 +84,14 @@ class VisionClient:
                 is_maximized=window_context.is_maximized,
                 width=width,
                 height=height,
-            )
+            ) + json_reminder
         else:
-            user_text = f"Analyze this screenshot. Screen resolution: {width}x{height}. What is the user doing?"
+            user_text = f"Analyze this screenshot. Screen resolution: {width}x{height}. What is the user doing?" + json_reminder
 
         self._last_call_time = time.time()
-        response = self.client.chat.completions.create(
+
+        # Build API kwargs; response_format may not be supported by all proxies
+        api_kwargs: dict = dict(
             model=self.config.model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -102,21 +109,53 @@ class VisionClient:
                     ],
                 },
             ],
-            response_format={"type": "json_object"},
             max_tokens=self.config.max_tokens,
             temperature=self.config.temperature,
         )
 
-        content = response.choices[0].message.content
+        try:
+            response = self.client.chat.completions.create(
+                response_format={"type": "json_object"}, **api_kwargs)
+        except Exception:
+            # Retry without response_format if proxy doesn't support it
+            response = self.client.chat.completions.create(**api_kwargs)
+
+        # Handle both standard OpenAI response and proxy string responses
+        if isinstance(response, str):
+            content = response
+        elif hasattr(response, "choices"):
+            content = response.choices[0].message.content
+        else:
+            content = str(response)
+
         if not content:
             log.warning("empty_response", frame_index=frame_index)
             return None
 
         import json
+        import re as _re
+
+        # Try direct JSON parse first
+        data = None
         try:
             data = json.loads(content)
         except json.JSONDecodeError:
-            log.warning("invalid_json_response", frame_index=frame_index,
+            # Strip markdown fences if present: ```json ... ```
+            stripped = _re.sub(r'^```(?:json)?\s*', '', content.strip())
+            stripped = _re.sub(r'\s*```$', '', stripped)
+            try:
+                data = json.loads(stripped)
+            except json.JSONDecodeError:
+                # Try to extract outermost JSON object from mixed text
+                json_match = _re.search(r'\{[\s\S]+\}', content)
+                if json_match:
+                    try:
+                        data = json.loads(json_match.group())
+                    except json.JSONDecodeError:
+                        pass
+
+        if data is None:
+            log.warning("no_json_in_response", frame_index=frame_index,
                         content=content[:200])
             return None
 

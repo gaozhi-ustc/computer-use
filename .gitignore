@@ -13,6 +13,11 @@ workflows/
 *.png
 *.jpg
 
+# Config with secrets
+config.toml
+config.test.toml
+config.record.toml
+
 # Environment
 .env
 .venv/
