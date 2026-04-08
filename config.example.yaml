@@ -1,0 +1,53 @@
+service:
+  name: "WorkflowRecorder"
+  display_name: "Workflow Recorder Daemon"
+  run_as_service: false  # true to run as Windows service
+
+capture:
+  interval_seconds: 3          # Screenshot frequency
+  monitor: 0                   # 0=primary, -1=all monitors
+  image_format: "png"
+  image_quality: 85            # JPEG quality (ignored for PNG)
+  downscale_factor: 1.0        # 0.5 = half resolution
+  max_queue_size: 50           # Drop frames if analysis falls behind
+
+privacy:
+  excluded_apps:               # Never capture these processes
+    - "KeePass.exe"
+    - "1Password.exe"
+    - "Bitwarden.exe"
+  excluded_window_titles:      # Regex patterns to skip
+    - ".*Private Browsing.*"
+    - ".*Incognito.*"
+  masked_regions: []           # Screen regions to black out: [[x, y, w, h], ...]
+
+analysis:
+  openai_api_key: "${OPENAI_API_KEY}"  # Reads from environment variable
+  model: "gpt-4o"
+  detail: "low"                # "low" (~$0.002/frame) or "high" (~$0.01/frame)
+  max_tokens: 500
+  temperature: 0.1
+  retry_attempts: 3
+  retry_backoff_base: 2        # Seconds: 2, 4, 8
+  rate_limit_rpm: 30           # Max API requests per minute
+
+session:
+  idle_timeout_seconds: 60     # Finalize after N seconds of no change
+  max_duration_seconds: 3600   # Max recording session length (1 hour)
+  similarity_threshold: 0.95   # Image similarity to consider "no change"
+
+aggregation:
+  llm_cleanup_pass: true       # Second LLM pass to clean up workflow
+  min_confidence: 0.3          # Discard frames below this confidence
+
+output:
+  directory: "./workflows"
+  format: "json"               # "json", "yaml", or "both"
+  include_reference_screenshots: true
+  include_markdown_summary: true
+
+logging:
+  level: "INFO"
+  file: "./logs/recorder.log"
+  max_size_mb: 50
+  backup_count: 5
