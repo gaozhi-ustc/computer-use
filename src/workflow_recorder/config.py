@@ -99,6 +99,38 @@ def _interpolate(obj):
     return obj
 
 
+def _load_json(path: str | Path) -> dict:
+    """Load a JSON file and return as dict."""
+    import json
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _apply_model_preset(data: dict) -> dict:
+    """Merge active model preset into analysis config.
+
+    If data contains 'model_presets' and 'active_preset', merge the selected
+    preset into 'analysis', then remove preset-related keys.
+    """
+    presets = data.get("model_presets")
+    active = data.get("active_preset")
+    if not presets or not active or active not in presets:
+        return data
+
+    preset = dict(presets[active])
+    preset.pop("name", None)  # display name, not a config field
+
+    analysis = data.get("analysis", {})
+    # Preset values are defaults; explicit analysis values take precedence
+    merged = {**preset, **{k: v for k, v in analysis.items() if v}}
+    data["analysis"] = merged
+
+    # Clean up non-config keys
+    data.pop("model_presets", None)
+    data.pop("active_preset", None)
+    return data
+
+
 def _load_toml(path: str | Path) -> dict:
     """Load a TOML file and return as dict."""
     import sys
@@ -114,13 +146,19 @@ def _load_toml(path: str | Path) -> dict:
 
 
 def load_config(path: Optional[str | Path] = None) -> AppConfig:
-    """Load configuration from a YAML or TOML file, falling back to defaults."""
+    """Load configuration from a YAML, TOML, or JSON file, falling back to defaults.
+
+    JSON files support model_presets + active_preset for multi-model switching.
+    """
     if path is None:
         return AppConfig()
     path = Path(path)
-    if path.suffix in (".toml",):
+    if path.suffix == ".toml":
         data = _load_toml(path)
+    elif path.suffix == ".json":
+        data = _load_json(path)
     else:
         with open(path) as f:
             data = yaml.safe_load(f) or {}
+    data = _apply_model_preset(data)
     return AppConfig(**data)

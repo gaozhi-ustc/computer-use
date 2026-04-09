@@ -17,6 +17,8 @@ workflows/
 config.toml
 config.test.toml
 config.record.toml
+config.json
+model_config.json
 
 # Environment
 .env

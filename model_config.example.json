@@ -1,0 +1,28 @@
+{
+  "model_presets": {
+    "gpt": {
+      "name": "GPT-4o (AiCodeMirror)",
+      "model": "gpt-4o",
+      "base_url": "https://api.aicodemirror.com/api/codex/backend-api/codex/v1",
+      "detail": "low",
+      "max_tokens": 1000,
+      "temperature": 0.1,
+      "rate_limit_rpm": 30
+    },
+    "qwen": {
+      "name": "Qwen3.5-Plus (Alibaba DashScope)",
+      "model": "qwen3.5-plus",
+      "base_url": "https://coding.dashscope.aliyuncs.com/v1",
+      "detail": "low",
+      "max_tokens": 1000,
+      "temperature": 0.1,
+      "rate_limit_rpm": 30
+    }
+  },
+  "active_preset": "qwen",
+  "analysis": {
+    "openai_api_key": "YOUR_API_KEY_HERE",
+    "retry_attempts": 3,
+    "retry_backoff_base": 2.0
+  }
+}

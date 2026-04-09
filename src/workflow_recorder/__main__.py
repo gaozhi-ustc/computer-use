@@ -26,9 +26,14 @@ def _print_banner(config) -> None:
     print("  Workflow Recorder v0.1.0")
     print("=" * 58)
     print()
+    base = config.analysis.base_url or "https://api.openai.com/v1"
+    has_key = "***" + config.analysis.openai_api_key[-4:] if len(config.analysis.openai_api_key) > 4 else "(not set)"
+
     print(f"  Screenshot interval:  {config.capture.interval_seconds}s")
     print(f"  Max recording time:   {mins}m {secs}s")
-    print(f"  GPT model:            {config.analysis.model}")
+    print(f"  Model:                {config.analysis.model}")
+    print(f"  API endpoint:         {base}")
+    print(f"  API key:              {has_key}")
     print(f"  Output directory:     {output_dir}")
     print()
     print("  Recording is now in progress.")
@@ -110,11 +115,20 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Auto-discover config: explicit arg > model_config.json > config.yaml > defaults
+    config_path = args.config
+    if config_path is None:
+        for candidate in ("model_config.json", "config.yaml", "config.json"):
+            p = Path(candidate)
+            if p.exists():
+                config_path = str(p)
+                break
+
     try:
-        config = load_config(args.config)
+        config = load_config(config_path)
     except Exception as e:
         print(f"\n  Error loading config: {e}")
-        print(f"  Please check your config file: {args.config}")
+        print(f"  Please check your config file: {config_path}")
         _wait_before_exit()
         sys.exit(1)
 
