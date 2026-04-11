@@ -218,6 +218,8 @@ class Daemon:
                 analysis = client.analyze_frame(
                     image_path=frame.capture.file_path,
                     window_context=frame.window_context,
+                    frame_index=frame.frame_index,
+                    timestamp=frame.capture.timestamp,
                 )
                 if analysis:
                     with self.session._lock:
