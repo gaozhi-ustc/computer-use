@@ -15,8 +15,8 @@ from workflow_recorder.init_wizard import needs_wizard, run_wizard
 from workflow_recorder.utils.logging import setup_logging
 
 
-def _run_single_mode(config) -> None:
-    """Run the standard single-model daemon."""
+def _run_daemon(config) -> None:
+    """Run the recorder daemon with live console progress."""
     _print_banner(config)
 
     daemon = Daemon(config)
@@ -43,135 +43,6 @@ def _run_single_mode(config) -> None:
         daemon_thread.join(timeout=10.0)
 
     _print_summary(daemon)
-
-
-def _run_dual_mode(config_path, config) -> None:
-    """Run dual-model recording with all configured presets."""
-    from workflow_recorder.config import load_dual_model_configs
-    from workflow_recorder.dual_daemon import DualModelDaemon
-
-    try:
-        model_configs = load_dual_model_configs(config_path)
-    except Exception as e:
-        print(f"\n  Error loading dual-model config: {e}")
-        print(f"  Ensure your config has 'model_presets' with multiple entries.")
-        return
-
-    if len(model_configs) < 2:
-        print("\n  Error: --dual mode requires at least 2 model presets.")
-        print(f"  Found {len(model_configs)} preset(s) in {config_path}")
-        return
-
-    _print_dual_banner(config, model_configs)
-
-    daemon = DualModelDaemon(config, model_configs)
-
-    def handle_signal(signum, frame):
-        print("\n\n  Stopping recording...")
-        daemon.stop()
-
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
-
-    import threading
-
-    daemon_thread = threading.Thread(target=daemon.run, daemon=True)
-    daemon_thread.start()
-
-    try:
-        while daemon_thread.is_alive():
-            _print_dual_progress(daemon)
-            daemon_thread.join(timeout=1.0)
-    except KeyboardInterrupt:
-        print("\n\n  Stopping recording...")
-        daemon.stop()
-        daemon_thread.join(timeout=10.0)
-
-    _print_dual_summary(daemon, model_configs)
-
-
-def _print_dual_banner(config, model_configs) -> None:
-    """Print startup banner for dual-model mode."""
-    output_dir = Path(config.output.directory).resolve()
-    duration = config.session.max_duration_seconds
-    mins = int(duration // 60)
-    secs = int(duration % 60)
-
-    print()
-    print("=" * 58)
-    print("  Workflow Recorder v0.1.0  [DUAL-MODE]")
-    print("=" * 58)
-    print()
-
-    for label, analysis_config in model_configs:
-        base = analysis_config.base_url or "https://api.openai.com/v1"
-        has_key = "***" + analysis_config.openai_api_key[-4:] if len(analysis_config.openai_api_key) > 4 else "(not set)"
-        print(f"  [{label}]")
-        print(f"    Model:       {analysis_config.model}")
-        print(f"    Endpoint:    {base}")
-        print(f"    API key:     {has_key}")
-        print()
-
-    print(f"  Screenshot interval:  {config.capture.interval_seconds}s")
-    print(f"  Max recording time:   {mins}m {secs}s")
-    print(f"  Output directory:     {output_dir}")
-    print()
-    print("  Dual-model recording is now in progress.")
-    print("  Press Ctrl+C to stop early.")
-    print()
-    print("-" * 58)
-
-
-def _print_dual_progress(daemon) -> None:
-    """Print periodic progress for dual-model mode."""
-    elapsed = int(daemon.elapsed)
-    captured = len(daemon.captured_frames)
-    mins, secs = divmod(elapsed, 60)
-
-    parts = [f"[{mins:02d}:{secs:02d}] Frames: {captured}"]
-    for worker in daemon.workers:
-        parts.append(f"{worker.label}: {len(worker.frame_analyses)}")
-
-    sys.stdout.write("\r  " + "  |  ".join(parts) + "  ")
-    sys.stdout.flush()
-
-
-def _print_dual_summary(daemon, model_configs) -> None:
-    """Print summary after dual-model recording ends."""
-    print()
-    print()
-    print("-" * 58)
-
-    elapsed = int(daemon.elapsed)
-    captured = len(daemon.captured_frames)
-    mins, secs = divmod(elapsed, 60)
-
-    print(f"  Recording complete!")
-    print()
-    print(f"  Duration:         {mins}m {secs}s")
-    print(f"  Frames captured:  {captured}")
-
-    output_dir = Path(daemon.config.output.directory).resolve()
-    for worker in daemon.workers:
-        analyzed = len(worker.frame_analyses)
-        sub_dir = output_dir / worker.label
-        json_files = list(sub_dir.glob("workflow_*.json")) if sub_dir.exists() else []
-        print()
-        print(f"  [{worker.label}]")
-        print(f"    Analyzed:     {analyzed}")
-        if json_files:
-            print(f"    JSON output:  {json_files[-1]}")
-
-    # Check for comparison report
-    comparison_files = list(output_dir.glob("comparison_*.md"))
-    if comparison_files:
-        print()
-        print(f"  Comparison report: {comparison_files[-1]}")
-
-    print()
-    print(f"  All outputs saved to: {output_dir}")
-    print()
-    print("=" * 58)
 
 
 def _print_banner(config) -> None:
@@ -279,17 +150,6 @@ def main() -> None:
         action="store_true",
         help="Only capture screenshots without GPT analysis",
     )
-    # --dual is kept as a hidden legacy flag; the main flow is single-model now.
-    parser.add_argument(
-        "--dual",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--recover",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
     args = parser.parse_args()
 
     # Auto-discover config: explicit arg > model_config.json > config.yaml > defaults
@@ -327,10 +187,7 @@ def main() -> None:
         backup_count=config.logging.backup_count,
     )
 
-    if args.dual:
-        _run_dual_mode(config_path, config)
-    else:
-        _run_single_mode(config)
+    _run_daemon(config)
 
     _wait_before_exit()
 

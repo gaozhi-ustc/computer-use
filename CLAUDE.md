@@ -47,7 +47,6 @@ src/workflow_recorder/
 ├── config.py            # Pydantic 配置，支持 ${ENV_VAR} / TOML / JSON 预设 / ServerConfig
 ├── init_wizard.py       # 首次运行交互向导（employee_id + DashScope API key）
 ├── frame_pusher.py      # 后台推送线程 + 失败帧 JSONL 缓冲 + 启动重推
-├── dual_daemon.py       # [legacy] 双模型扇出 daemon（--dual 隐藏标志保留）
 ├── capture/
 │   ├── screenshot.py    # mss 截屏
 │   ├── window_info.py   # 活动窗口检测 (Win32/macOS)
@@ -63,8 +62,7 @@ src/workflow_recorder/
 ├── output/
 │   ├── schema.py        # Workflow JSON Pydantic 模型
 │   ├── writer.py        # JSON/YAML/Markdown 输出
-│   ├── reference_store.py   # 参考截图管理
-│   └── comparison.py    # [legacy] 双模型工作流对比报告
+│   └── reference_store.py   # 参考截图管理
 └── utils/
     ├── logging.py       # structlog 配置
     ├── retry.py         # 指数退避重试
@@ -98,9 +96,6 @@ WORKFLOW_SERVER_KEY=changeme uvicorn server.app:app --host 0.0.0.0 --port 8000
 
 # 服务端查询（示例）
 curl -H "X-API-Key: changeme" "http://127.0.0.1:8000/frames?employee_id=E001&limit=20"
-
-# [legacy] 双模型并行录制（隐藏标志，向后兼容）
-PYTHONPATH=src python3 -m workflow_recorder -c dual_model_config.json --dual
 
 # 运行测试
 PYTHONPATH=src python3 -m pytest tests/ -v
@@ -173,9 +168,10 @@ model    = qwen3.5-plus
 - **鉴权**: env `WORKFLOW_SERVER_KEY` 存在时强制 `X-API-Key` header 匹配；env 不设则开放（仅建议本地开发）。客户端的 key 从 `ServerConfig.api_key` 读
 - **数据库路径**: env `WORKFLOW_SERVER_DB` 覆盖默认 `./frames.db`
 
-### [legacy] 双模型模式 / aicodemirror
+### 历史备忘
 
-`dual_daemon.py`、`output/comparison.py`、`--dual` / `--recover` CLI 标志仍在仓库里，但已从 `--help` 输出中隐藏。不建议新部署使用，留着是防止回滚老会话用。`aicodemirror` 代理在 2026-04-11 烟测里已确认不再路由 `gpt-4o`（返回 `SETTLEMENT_UNKNOWN_MODEL` HTTP 400），所以当前主流程也不再依赖它。
+- 2026-04-11 烟测确认 aicodemirror 代理已不再路由 `gpt-4o`（返回 `SETTLEMENT_UNKNOWN_MODEL` HTTP 400），所以主流程完全迁移到 DashScope + qwen3.5-plus。
+- 旧版双模型并行录制代码（`dual_daemon.py` / `output/comparison.py` / `--dual` / `--recover` / `load_dual_model_configs`）在单模型化完成后已整体删除；如需回看，检出 commit `86219a6` 之前的历史即可。
 
 ## 测试
 
@@ -189,8 +185,9 @@ model    = qwen3.5-plus
 ## Windows 安装程序
 
 基于 PyInstaller + Inno Setup 构建，特性：
-- 安装向导含模型选择页面（GPT-4o / Qwen3.5-Plus）
-- 自动生成 `model_config.json`
+- 安装向导收集员工 ID + DashScope API key，写入 `model_config.json`
 - 可选 PATH 集成和 Windows 服务安装
 - 配置文件在升级时保留，卸载时不删除
 - 构建：`python installer/build.py --installer`
+
+注：`installer/workflow_recorder.iss` 仍保留 GPT-4o / Qwen 两个预设的选择 UI（遗留），但服务端推送管线只支持单模型，升级安装向导跟进是待办事项。
