@@ -78,7 +78,7 @@ installer/
 └── verify_build.py          # 构建产物校验
 tests/
 ├── conftest.py              # 测试 fixture + pytest markers 定义
-├── test_*.py                # 93 个单元测试
+├── test_*.py                # 133 个单元测试（含 init_wizard / frame_pusher / server db）
 ├── integration/             # 5 个集成测试
 └── e2e/                     # 2 个端到端测试
 model_config.example.json    # 模型预设配置示例（Qwen3.5-Plus 默认 active）
@@ -124,10 +124,21 @@ net start WorkflowRecorder
 参见 `config.example.yaml`，支持环境变量插值 `${OPENAI_API_KEY}`。
 
 关键配置项：
-- `capture.interval_seconds`: 截屏间隔（默认 3 秒）
+- `capture.interval_seconds`: 截屏间隔（**生产环境建议 ≥ 15 秒**，见下面 RTT 章节）
 - `privacy.excluded_apps`: 排除的进程名列表
 - `analysis.detail`: "low"（~$0.002/帧）或 "high"（~$0.01/帧）
 - `session.similarity_threshold`: 图像去重阈值（默认 0.95）
+
+### 性能与 interval 建议
+
+**实测 qwen3.5-plus 视觉调用 RTT ≈ 12 秒**（2026-04-11 烟测，单帧 low detail，DashScope OpenAI 兼容端点，`downscale_factor = 0.5`）。含义：
+
+- **`capture.interval_seconds` 不应小于 15** —— 否则 capture 线程会比 analysis 快很多，分析队列永远堆积，新帧不停从 capture 端丢弃（或推迟分析到几分钟之后），既浪费截屏又错过实时信号。
+- **Capture 速度与 Analysis 速度需要粗略匹配**。如果你想要更高帧率，只能降低单帧 analysis 耗时（缩小图片 / 降低 max_tokens / 裁剪到活动窗口），而不是拉短 interval。
+- **队列不会阻塞 capture**：`capture.max_queue_size` 保证 capture 不被 analysis 卡死。队列满时最新帧直接丢弃而不是阻塞，所以 capture interval 可以短，但后果是大量 drop。`frame_dropped` 警告日志就是这种情况。
+- **推送管线的 queue 和 capture queue 是独立的**。即使 analysis 慢到推送跟不上，`frame_pusher` 也有自己的 JSONL buffer 兜底。
+
+仓库里的 `config.record.toml` / `dual_model_config.json` 已同步调到 `interval_seconds = 15`。集成测试 `config.test.toml` 保留 2 秒作为极端情况用例。
 
 ### 主流程（qwen3.5-plus）
 
@@ -176,11 +187,13 @@ model    = qwen3.5-plus
 ## 测试
 
 测试套件分层：
-- **单元测试** (93 个): 各模块独立逻辑，mock 外部依赖
+- **单元测试** (133 个): 各模块独立逻辑，mock 外部依赖（含推送/向导/服务端 db）
 - **集成测试** (5 个): 配置加载 + 分析管线端到端
 - **端到端测试** (2 个): 完整录制流程验证
 
 使用 pytest markers 区分：`@pytest.mark.integration` / `@pytest.mark.e2e`，通过 `--run-integration` / `--run-e2e` 启用。
+
+`frame_pusher` 测试用 `FakeClient` 替换 `httpx.Client`（monkeypatch），避免真的走网络；`server/db.py` 测试通过 `WORKFLOW_SERVER_DB` env var 把 DB 指到 `tmp_path`，每个测试都是隔离的空库。
 
 ## Windows 安装程序
 
