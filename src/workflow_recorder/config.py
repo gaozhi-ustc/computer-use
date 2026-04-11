@@ -69,7 +69,19 @@ class LoggingConfig(BaseModel):
     backup_count: int = 5
 
 
+class ServerConfig(BaseModel):
+    """Upstream server that collects per-frame analysis results."""
+    enabled: bool = True
+    url: str = "http://127.0.0.1:8000"
+    api_key: str = ""
+    timeout_seconds: float = 10.0
+    max_retries: int = 3
+    buffer_path: str = "./logs/push_buffer.jsonl"
+    queue_size: int = 500
+
+
 class AppConfig(BaseModel):
+    employee_id: str = ""  # filled by init wizard on first run
     service: ServiceConfig = Field(default_factory=ServiceConfig)
     capture: CaptureConfig = Field(default_factory=CaptureConfig)
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
@@ -78,6 +90,7 @@ class AppConfig(BaseModel):
     aggregation: AggregationConfig = Field(default_factory=AggregationConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    server: ServerConfig = Field(default_factory=ServerConfig)
 
     @model_validator(mode="before")
     @classmethod

@@ -23,6 +23,7 @@ from workflow_recorder.capture.privacy import apply_masks, should_skip_frame
 from workflow_recorder.capture.screenshot import CaptureResult, capture_screenshot
 from workflow_recorder.capture.window_info import WindowContext, get_active_window
 from workflow_recorder.config import AppConfig
+from workflow_recorder.frame_pusher import FramePusher
 from workflow_recorder.utils.storage import get_temp_capture_dir
 
 if TYPE_CHECKING:
@@ -126,11 +127,20 @@ class Daemon:
         self.config = config
         self.session: RecordingSession | None = None
         self._stop_event = threading.Event()
+        self.pusher: FramePusher | None = None
 
     def run(self) -> None:
         """Run the daemon in foreground mode (blocking)."""
         log.info("daemon_starting", mode="foreground")
         self.session = RecordingSession(self.config)
+
+        # Start the background frame pusher (no-op if server.enabled is False).
+        self.pusher = FramePusher(
+            server_config=self.config.server,
+            employee_id=self.config.employee_id,
+            session_id=self.session.session_id,
+        )
+        self.pusher.start()
 
         capture_thread = threading.Thread(
             target=self._capture_loop,
@@ -214,6 +224,8 @@ class Daemon:
                         self.session.frame_analyses.append(analysis)
                     log.debug("frame_analyzed", frame_index=frame.frame_index,
                               action=analysis.user_action)
+                    if self.pusher is not None:
+                        self.pusher.enqueue(analysis)
             except Exception:
                 log.exception("analysis_failed", frame_index=frame.frame_index)
 
@@ -239,6 +251,11 @@ class Daemon:
             return
 
         self.stop()
+
+        # Flush remaining frames up to the server before aggregation.
+        if self.pusher is not None:
+            self.pusher.stop()
+
         log.info("finalizing_session",
                  session_id=self.session.session_id,
                  frames_captured=len(self.session.captured_frames),

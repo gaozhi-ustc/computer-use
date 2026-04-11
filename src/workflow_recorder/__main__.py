@@ -11,6 +11,7 @@ from pathlib import Path
 
 from workflow_recorder.config import load_config
 from workflow_recorder.daemon import Daemon
+from workflow_recorder.init_wizard import needs_wizard, run_wizard
 from workflow_recorder.utils.logging import setup_logging
 
 
@@ -187,12 +188,15 @@ def _print_banner(config) -> None:
     print()
     base = config.analysis.base_url or "https://api.openai.com/v1"
     has_key = "***" + config.analysis.openai_api_key[-4:] if len(config.analysis.openai_api_key) > 4 else "(not set)"
+    server_status = config.server.url if config.server.enabled else "disabled"
 
+    print(f"  Employee ID:          {config.employee_id or '(not set)'}")
     print(f"  Screenshot interval:  {config.capture.interval_seconds}s")
     print(f"  Max recording time:   {mins}m {secs}s")
     print(f"  Model:                {config.analysis.model}")
     print(f"  API endpoint:         {base}")
     print(f"  API key:              {has_key}")
+    print(f"  Push target:          {server_status}")
     print(f"  Output directory:     {output_dir}")
     print()
     print("  Recording is now in progress.")
@@ -236,6 +240,9 @@ def _print_summary(daemon) -> None:
     print(f"  Duration:         {mins}m {secs}s")
     print(f"  Frames captured:  {captured}")
     print(f"  Frames analyzed:  {analyzed}")
+    if daemon.pusher is not None and daemon.config.server.enabled:
+        print(f"  Pushed to server: {daemon.pusher.pushed_ok}"
+              f"  (buffered on failure: {daemon.pusher.buffered})")
 
     output_dir = Path(daemon.config.output.directory).resolve()
     if output_dir.exists():
@@ -272,15 +279,16 @@ def main() -> None:
         action="store_true",
         help="Only capture screenshots without GPT analysis",
     )
+    # --dual is kept as a hidden legacy flag; the main flow is single-model now.
     parser.add_argument(
         "--dual",
         action="store_true",
-        help="Run dual-model recording with all configured presets simultaneously",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--recover",
         action="store_true",
-        help="Recover analyses from JSONL files and rebuild workflow documents",
+        help=argparse.SUPPRESS,
     )
     args = parser.parse_args()
 
@@ -300,6 +308,14 @@ def main() -> None:
         print(f"  Please check your config file: {config_path}")
         _wait_before_exit()
         sys.exit(1)
+
+    # Interactive first-run setup for employee_id / API key if missing.
+    if needs_wizard(config):
+        try:
+            config = run_wizard(config, config_path)
+        except SystemExit:
+            _wait_before_exit()
+            raise
 
     # Resolve output directory to absolute path
     config.output.directory = str(Path(config.output.directory).resolve())
