@@ -16,10 +16,11 @@ ISS_FILE = PROJECT_ROOT / "installer" / "workflow_recorder.iss"
 VERIFY_SCRIPT = PROJECT_ROOT / "installer" / "verify_build.py"
 DIST_DIR = PROJECT_ROOT / "dist" / "WorkflowRecorder"
 
-# Common Inno Setup locations
+# Common Inno Setup locations (machine-wide first, then per-user winget install)
 ISCC_PATHS = [
     r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
     r"C:\Program Files\Inno Setup 6\ISCC.exe",
+    os.path.expandvars(r"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"),
 ]
 
 
