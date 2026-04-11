@@ -19,6 +19,8 @@ config.test.toml
 config.record.toml
 config.json
 model_config.json
+dual_model_config.json
+models.json
 
 # Environment
 .env
@@ -29,3 +31,6 @@ venv/
 .idea/
 .vscode/
 *.swp
+
+# Claude Code local state
+.claude/

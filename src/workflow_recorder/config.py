@@ -162,3 +162,31 @@ def load_config(path: Optional[str | Path] = None) -> AppConfig:
             data = yaml.safe_load(f) or {}
     data = _apply_model_preset(data)
     return AppConfig(**data)
+
+
+def load_dual_model_configs(path: str | Path) -> list[tuple[str, AnalysisConfig]]:
+    """Load all model presets from a JSON config as separate (label, AnalysisConfig) pairs.
+
+    Intended for dual-model mode where all presets run in parallel.
+    Each preset's fields override the top-level analysis section.
+    Env var interpolation (${VAR}) is applied to the entire config first.
+    """
+    path = Path(path)
+    if path.suffix == ".json":
+        data = _load_json(path)
+    else:
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+    data = _interpolate(data)
+
+    presets = data.get("model_presets", {})
+    base_analysis = data.get("analysis", {})
+    if not presets:
+        raise ValueError("No model_presets found in config file")
+
+    results: list[tuple[str, AnalysisConfig]] = []
+    for label, preset in presets.items():
+        # Preset values override base analysis; preset's own key takes priority
+        merged = {**base_analysis, **{k: v for k, v in preset.items() if k != "name"}}
+        results.append((label, AnalysisConfig(**merged)))
+    return results
