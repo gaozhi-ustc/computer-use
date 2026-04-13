@@ -4,7 +4,7 @@ import {
   NCard, NGrid, NGi, NDatePicker, NInput, NButton, NDataTable,
   NSpin, NProgress, NH2, NText, NSpace, NTag,
 } from 'naive-ui'
-import { statsApi, type FrameStats, type HeatmapCell } from '@/api/stats'
+import { statsApi, type FrameStats } from '@/api/stats'
 
 const loading = ref(false)
 const employeeId = ref('')
@@ -114,7 +114,7 @@ onMounted(() => loadStats())
             <div v-if="stats.app_usage.length === 0" style="color: #999; text-align: center; padding: 24px;">
               暂无数据
             </div>
-            <div v-for="item in stats.app_usage.slice(0, 15)" :key="item.application" style="margin-bottom: 10px;">
+            <div v-for="item in stats.app_usage.slice(0, 15)" :key="item.application ?? 'unknown'" style="margin-bottom: 10px;">
               <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
                 <span>{{ item.application || '(未知)' }}</span>
                 <n-tag size="small" :bordered="false">{{ item.frame_count }} 帧</n-tag>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { NGrid, NGi, NCard, NStatistic, NDataTable, NTag, NSpin, NProgress, NH2, NText } from 'naive-ui'
+import { NGrid, NGi, NCard, NStatistic, NDataTable, NSpin, NProgress, NH2, NText } from 'naive-ui'
 import { statsApi, type DashboardSummary, type AppUsage } from '@/api/stats'
 import type { SessionInfo } from '@/api/sessions'
 
@@ -87,7 +87,7 @@ onMounted(async () => {
             <div v-if="appUsage.length === 0" style="color: #999; text-align: center; padding: 24px;">
               暂无数据
             </div>
-            <div v-for="item in appUsage" :key="item.application" style="margin-bottom: 12px;">
+            <div v-for="item in appUsage" :key="item.application ?? 'unknown'" style="margin-bottom: 12px;">
               <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
                 <span>{{ item.application || '(未知)' }}</span>
                 <span style="color: #999;">{{ item.frame_count }} 帧</span>

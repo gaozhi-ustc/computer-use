@@ -39,9 +39,6 @@ const columns: DataTableColumns<SearchFrame> = [
   { title: '记录时间', key: 'recorded_at', width: 180 },
 ]
 
-const expandColumns: DataTableColumns<SearchFrame> = [
-  { title: '文本内容', key: 'text_content' },
-]
 
 async function doSearch() {
   loading.value = true
