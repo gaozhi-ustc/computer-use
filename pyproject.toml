@@ -1,6 +1,6 @@
 [build-system]
 requires = ["hatchling"]
-build-backend = "hatchling.backends"
+build-backend = "hatchling.build"
 
 [project]
 name = "workflow-recorder"
@@ -28,6 +28,8 @@ dev = [
 server = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
+    "PyJWT>=2.8",
+    "passlib[bcrypt]>=1.7",
 ]
 
 [project.scripts]
