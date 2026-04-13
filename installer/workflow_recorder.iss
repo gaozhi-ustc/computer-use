@@ -160,6 +160,40 @@ begin
   Result := Res;
 end;
 
+procedure PatchExistingConfig(ConfigPath: string);
+var
+  Content: AnsiString;
+  S: string;
+  ServerUrl: string;
+  EmpId: string;
+  ApiKey: string;
+begin
+  if not LoadStringFromFile(ConfigPath, Content) then Exit;
+  S := String(Content);
+
+  ServerUrl := JsonEscape(Trim(ServerUrlEdit.Text));
+  EmpId := JsonEscape(Trim(EmployeeIdEdit.Text));
+  ApiKey := JsonEscape(Trim(ApiKeyEdit.Text));
+
+  { Always update server.enabled to true }
+  StringChange(S, '"enabled": false', '"enabled": true');
+  StringChange(S, '"enabled":false', '"enabled": true');
+
+  { Update server.url from known defaults to user-provided value }
+  StringChange(S, '"url": "http://127.0.0.1:8000"', '"url": "' + ServerUrl + '"');
+  StringChange(S, '"url": "http://localhost:8000"', '"url": "' + ServerUrl + '"');
+
+  { Fill empty employee_id if user provided one }
+  if EmpId <> '' then
+    StringChange(S, '"employee_id": ""', '"employee_id": "' + EmpId + '"');
+
+  { Fill empty api_key if user provided one }
+  if ApiKey <> '' then
+    StringChange(S, '"openai_api_key": ""', '"openai_api_key": "' + ApiKey + '"');
+
+  SaveStringToFile(ConfigPath, AnsiString(S), False);
+end;
+
 procedure WriteModelConfig();
 var
   Lines: TStringList;
@@ -169,9 +203,12 @@ var
 begin
   ConfigPath := ExpandConstant('{app}\model_config.json');
 
-  { Don't overwrite on upgrade. }
+  { On upgrade: patch server.url + server.enabled, fill empty fields }
   if FileExists(ConfigPath) then
+  begin
+    PatchExistingConfig(ConfigPath);
     Exit;
+  end;
 
   EmpId := JsonEscape(Trim(EmployeeIdEdit.Text));
   ApiKey := JsonEscape(Trim(ApiKeyEdit.Text));
