@@ -55,3 +55,97 @@ class UserUpdate(BaseModel):
 class UserListResponse(BaseModel):
     total: int
     users: list[UserInfo]
+
+
+# ---------------------------------------------------------------------------
+# SOP models
+# ---------------------------------------------------------------------------
+
+
+class SopCreate(BaseModel):
+    title: str
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
+    assigned_reviewer: Optional[str] = None
+    source_session_id: Optional[str] = None
+    source_employee_id: Optional[str] = None
+
+
+class SopUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    tags: Optional[list[str]] = None
+    assigned_reviewer: Optional[str] = None
+
+
+class SopStatusUpdate(BaseModel):
+    status: str  # in_review, published, draft (reject)
+
+
+class SopInfo(BaseModel):
+    id: int
+    title: str
+    description: str = ""
+    status: str
+    created_by: str
+    assigned_reviewer: Optional[str] = None
+    source_session_id: Optional[str] = None
+    source_employee_id: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+    published_at: Optional[str] = None
+
+
+class StepInfo(BaseModel):
+    id: int
+    sop_id: int
+    step_order: int
+    title: str
+    description: str = ""
+    application: str = ""
+    action_type: str = ""
+    action_detail: dict = Field(default_factory=dict)
+    screenshot_ref: str = ""
+    source_frame_ids: list[int] = Field(default_factory=list)
+    confidence: float = 0.0
+    created_at: str
+    updated_at: str
+
+
+class SopDetail(SopInfo):
+    steps: list[StepInfo] = Field(default_factory=list)
+
+
+class SopListResponse(BaseModel):
+    total: int
+    count: int
+    sops: list[SopInfo]
+
+
+class StepCreate(BaseModel):
+    step_order: int
+    title: str
+    description: str = ""
+    application: str = ""
+    action_type: str = ""
+    action_detail: dict = Field(default_factory=dict)
+    screenshot_ref: str = ""
+    source_frame_ids: list[int] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
+class StepUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    step_order: Optional[int] = None
+    application: Optional[str] = None
+    action_type: Optional[str] = None
+    action_detail: Optional[dict] = None
+    screenshot_ref: Optional[str] = None
+    source_frame_ids: Optional[list[int]] = None
+    confidence: Optional[float] = None
+
+
+class StepReorder(BaseModel):
+    step_ids: list[int]

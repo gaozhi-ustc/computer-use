@@ -395,6 +395,181 @@ def get_department_employee_ids(department_id: str) -> list[str]:
     return [r["employee_id"] for r in rows]
 
 
+# ---------------------------------------------------------------------------
+# SOP CRUD
+# ---------------------------------------------------------------------------
+
+
+def insert_sop(
+    title: str,
+    created_by: str,
+    description: str = "",
+    status: str = "draft",
+    assigned_reviewer: str | None = None,
+    source_session_id: str | None = None,
+    source_employee_id: str | None = None,
+    tags: list[str] | None = None,
+) -> int:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO sops (title, description, status, created_by,
+               assigned_reviewer, source_session_id, source_employee_id,
+               tags, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (title, description, status, created_by, assigned_reviewer,
+             source_session_id, source_employee_id,
+             json.dumps(tags or []), now, now),
+        )
+        return cur.lastrowid
+
+
+def get_sop(sop_id: int) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM sops WHERE id = ?", (sop_id,)).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["tags"] = json.loads(d.get("tags") or "[]")
+    return d
+
+
+def list_sops(
+    status: str | None = None,
+    created_by: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    if created_by:
+        clauses.append("created_by = ?")
+        params.append(created_by)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    params.extend([limit, offset])
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM sops {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?", params
+        ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["tags"] = json.loads(d.get("tags") or "[]")
+        result.append(d)
+    return result
+
+
+def count_sops(status: str | None = None, created_by: str | None = None) -> int:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    if created_by:
+        clauses.append("created_by = ?")
+        params.append(created_by)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    with connect() as conn:
+        (count,) = conn.execute(f"SELECT COUNT(*) FROM sops {where}", params).fetchone()
+    return int(count)
+
+
+def update_sop(sop_id: int, **fields) -> None:
+    if not fields:
+        return
+    fields["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if "tags" in fields and isinstance(fields["tags"], list):
+        fields["tags"] = json.dumps(fields["tags"])
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    vals = list(fields.values()) + [sop_id]
+    with connect() as conn:
+        conn.execute(f"UPDATE sops SET {sets} WHERE id = ?", vals)
+
+
+def delete_sop(sop_id: int) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM sop_steps WHERE sop_id = ?", (sop_id,))
+        conn.execute("DELETE FROM sops WHERE id = ?", (sop_id,))
+
+
+# ---------------------------------------------------------------------------
+# SOP Steps CRUD
+# ---------------------------------------------------------------------------
+
+
+def insert_sop_step(
+    sop_id: int,
+    step_order: int,
+    title: str,
+    description: str = "",
+    application: str = "",
+    action_type: str = "",
+    action_detail: dict | None = None,
+    screenshot_ref: str = "",
+    source_frame_ids: list[int] | None = None,
+    confidence: float = 0.0,
+) -> int:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO sop_steps (sop_id, step_order, title, description,
+               application, action_type, action_detail, screenshot_ref,
+               source_frame_ids, confidence, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (sop_id, step_order, title, description, application, action_type,
+             json.dumps(action_detail or {}), screenshot_ref,
+             json.dumps(source_frame_ids or []), confidence, now, now),
+        )
+        return cur.lastrowid
+
+
+def list_sop_steps(sop_id: int) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM sop_steps WHERE sop_id = ? ORDER BY step_order", (sop_id,)
+        ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["action_detail"] = json.loads(d.get("action_detail") or "{}")
+        d["source_frame_ids"] = json.loads(d.get("source_frame_ids") or "[]")
+        result.append(d)
+    return result
+
+
+def update_sop_step(step_id: int, **fields) -> None:
+    if not fields:
+        return
+    fields["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if "action_detail" in fields and isinstance(fields["action_detail"], dict):
+        fields["action_detail"] = json.dumps(fields["action_detail"])
+    if "source_frame_ids" in fields and isinstance(fields["source_frame_ids"], list):
+        fields["source_frame_ids"] = json.dumps(fields["source_frame_ids"])
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    vals = list(fields.values()) + [step_id]
+    with connect() as conn:
+        conn.execute(f"UPDATE sop_steps SET {sets} WHERE id = ?", vals)
+
+
+def delete_sop_step(step_id: int) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM sop_steps WHERE id = ?", (step_id,))
+
+
+def reorder_sop_steps(sop_id: int, step_ids: list[int]) -> None:
+    """Update step_order for all steps in the given order."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect() as conn:
+        for order, step_id in enumerate(step_ids, 1):
+            conn.execute(
+                "UPDATE sop_steps SET step_order = ?, updated_at = ? WHERE id = ? AND sop_id = ?",
+                (order, now, step_id, sop_id),
+            )
+
+
 def _ts_to_iso(ts: Any) -> str:
     """Convert a unix timestamp (float) to ISO-8601, or echo a pre-formatted string."""
     if isinstance(ts, (int, float)):
