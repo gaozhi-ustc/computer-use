@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from server import db
 from server.auth_router import router as auth_router
+from server.users_router import router as users_router
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +121,7 @@ app = FastAPI(
     version="0.1.0",
 )
 app.include_router(auth_router)
+app.include_router(users_router)
 
 
 @app.on_event("startup")
