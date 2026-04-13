@@ -1,12 +1,18 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { sessionsApi, type SessionInfo, type SessionDetail } from '@/api/sessions'
+import { sopsApi } from '@/api/sops'
 import {
   NCard, NSpace, NInput, NDatePicker, NTag, NBadge, NEmpty,
   NSpin, NTimeline, NTimelineItem, NProgress, NGrid, NGi,
-  NScrollbar, NDescriptions, NDescriptionsItem, NCollapse, NCollapseItem
+  NScrollbar, NDescriptions, NDescriptionsItem, NCollapse, NCollapseItem,
+  NButton, useMessage
 } from 'naive-ui'
+
+const router = useRouter()
+const message = useMessage()
 
 const auth = useAuthStore()
 const sessions = ref<SessionInfo[]>([])
@@ -16,6 +22,27 @@ const detailLoading = ref(false)
 const employeeFilter = ref('')
 const dateRange = ref<[number, number] | null>(null)
 const selectedSessionId = ref('')
+const generatingSop = ref(false)
+
+async function generateSop() {
+  if (!selectedSession.value) return
+  generatingSop.value = true
+  try {
+    const session = selectedSession.value
+    const { data: sopData } = await sopsApi.create({
+      title: `SOP - ${session.employee_id} / ${session.session_id.slice(0, 8)}`,
+      source_session_id: session.session_id,
+      source_employee_id: session.employee_id,
+    })
+    await sopsApi.generate(sopData.id)
+    message.success('SOP 已生成')
+    router.push(`/sops/${sopData.id}`)
+  } catch {
+    message.error('生成 SOP 失败')
+  } finally {
+    generatingSop.value = false
+  }
+}
 
 async function fetchSessions() {
   loading.value = true
@@ -196,6 +223,17 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
                   {{ selectedSession.frames.length }} 帧已加载
                 </NDescriptionsItem>
               </NDescriptions>
+
+              <NSpace style="margin-bottom: 16px">
+                <NButton
+                  v-if="auth.isAdmin || auth.isManager"
+                  type="primary"
+                  :loading="generatingSop"
+                  @click="generateSop"
+                >
+                  从此会话生成 SOP
+                </NButton>
+              </NSpace>
 
               <NScrollbar style="max-height: calc(100vh - 360px)">
                 <NEmpty
