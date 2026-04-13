@@ -205,3 +205,63 @@ def test_unicode_in_user_action_and_ui_elements(fresh_db):
     rows = db.query_frames()
     assert rows[0]["user_action"] == "在聊天窗口输入消息"
     assert rows[0]["ui_elements"][0]["name"] == "发送"
+
+
+# ---------------------------------------------------------------------------
+# User CRUD
+# ---------------------------------------------------------------------------
+
+
+def test_insert_user_and_query(fresh_db):
+    from server.db import insert_user, get_user_by_username
+    user_id = insert_user(
+        username="testadmin", password_hash="$2b$12$fakehash",
+        display_name="Test Admin", role="admin", employee_id="E001",
+    )
+    assert user_id == 1
+    user = get_user_by_username("testadmin")
+    assert user is not None
+    assert user["username"] == "testadmin"
+    assert user["role"] == "admin"
+    assert user["employee_id"] == "E001"
+    assert user["is_active"] == 1
+
+
+def test_insert_duplicate_username_raises(fresh_db):
+    from server.db import insert_user
+    import sqlite3
+    insert_user(username="dup", password_hash="x", display_name="A", role="employee")
+    with pytest.raises(sqlite3.IntegrityError):
+        insert_user(username="dup", password_hash="y", display_name="B", role="employee")
+
+
+def test_get_user_by_id(fresh_db):
+    from server.db import insert_user, get_user_by_id
+    uid = insert_user(username="byid", password_hash="x", display_name="ByID", role="employee")
+    user = get_user_by_id(uid)
+    assert user["username"] == "byid"
+
+
+def test_list_users(fresh_db):
+    from server.db import insert_user, list_users
+    insert_user(username="a", password_hash="x", display_name="A", role="admin")
+    insert_user(username="b", password_hash="x", display_name="B", role="employee")
+    insert_user(username="c", password_hash="x", display_name="C", role="manager")
+    users = list_users()
+    assert len(users) == 3
+
+
+def test_update_user(fresh_db):
+    from server.db import insert_user, update_user, get_user_by_id
+    uid = insert_user(username="upd", password_hash="x", display_name="Old", role="employee")
+    update_user(uid, display_name="New", role="manager")
+    user = get_user_by_id(uid)
+    assert user["display_name"] == "New"
+    assert user["role"] == "manager"
+
+
+def test_delete_user(fresh_db):
+    from server.db import insert_user, delete_user, get_user_by_id
+    uid = insert_user(username="del", password_hash="x", display_name="Del", role="employee")
+    delete_user(uid)
+    assert get_user_by_id(uid) is None
