@@ -74,16 +74,17 @@ begin
     'Workflow Recorder Configuration',
     'Enter your employee ID and DashScope (Bailian) API key. Both are required for the recorder to run. You can change them later in model_config.json.');
 
-  { Employee ID }
+  { Employee ID — 32px gap between label bottom and edit top for DPI+CJK safety }
   Lbl := TNewStaticText.Create(SetupPage);
   Lbl.Parent := SetupPage.Surface;
   Lbl.Caption := 'Employee ID (员工工号):';
-  Lbl.Top := 10;
+  Lbl.Top := 8;
   Lbl.Left := 0;
+  Lbl.AutoSize := True;
 
   EmployeeIdEdit := TNewEdit.Create(SetupPage);
   EmployeeIdEdit.Parent := SetupPage.Surface;
-  EmployeeIdEdit.Top := 30;
+  EmployeeIdEdit.Top := 40;
   EmployeeIdEdit.Left := 0;
   EmployeeIdEdit.Width := 400;
   EmployeeIdEdit.Text := '';
@@ -92,12 +93,13 @@ begin
   Lbl := TNewStaticText.Create(SetupPage);
   Lbl.Parent := SetupPage.Surface;
   Lbl.Caption := 'DashScope API Key (百炼平台 sk-...):';
-  Lbl.Top := 75;
+  Lbl.Top := 88;
   Lbl.Left := 0;
+  Lbl.AutoSize := True;
 
   ApiKeyEdit := TNewEdit.Create(SetupPage);
   ApiKeyEdit.Parent := SetupPage.Surface;
-  ApiKeyEdit.Top := 95;
+  ApiKeyEdit.Top := 120;
   ApiKeyEdit.Left := 0;
   ApiKeyEdit.Width := 400;
   ApiKeyEdit.Text := '';
@@ -110,7 +112,7 @@ begin
     '' + #13#10 +
     'If you leave a field blank, the recorder will prompt you interactively' + #13#10 +
     'on first run and save your answers to model_config.json.';
-  Hint.Top := 140;
+  Hint.Top := 175;
   Hint.Left := 0;
   Hint.Font.Color := clGray;
   Hint.AutoSize := True;
