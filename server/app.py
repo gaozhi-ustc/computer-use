@@ -127,6 +127,15 @@ app.include_router(users_router)
 @app.on_event("startup")
 def _startup() -> None:
     db.init_db()
+    # Seed default admin if no users exist yet
+    if not db.list_users(limit=1):
+        from server.auth import hash_password
+        db.insert_user(
+            username="admin",
+            password_hash=hash_password("admin"),
+            display_name="System Admin",
+            role="admin",
+        )
 
 
 @app.get("/health")
