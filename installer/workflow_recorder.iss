@@ -1,5 +1,5 @@
 #define MyAppName "Workflow Recorder"
-#define MyAppVersion "0.3.0"
+#define MyAppVersion "0.3.1"
 #define MyAppPublisher "Workflow Recorder"
 #define MyAppExeName "workflow-recorder.exe"
 #define MyAppURL "https://github.com/gaozhi-ustc/computer-use"
@@ -64,6 +64,7 @@ var
   SetupPage: TWizardPage;
   EmployeeIdEdit: TNewEdit;
   ApiKeyEdit: TNewEdit;
+  ServerUrlEdit: TNewEdit;
 
 procedure InitializeWizard();
 var
@@ -104,15 +105,29 @@ begin
   ApiKeyEdit.Width := 400;
   ApiKeyEdit.Text := '';
 
+  { Server URL }
+  Lbl := TNewStaticText.Create(SetupPage);
+  Lbl.Parent := SetupPage.Surface;
+  Lbl.Caption := 'Server URL (服务端地址):';
+  Lbl.Top := 168;
+  Lbl.Left := 0;
+  Lbl.AutoSize := True;
+
+  ServerUrlEdit := TNewEdit.Create(SetupPage);
+  ServerUrlEdit.Parent := SetupPage.Surface;
+  ServerUrlEdit.Top := 200;
+  ServerUrlEdit.Left := 0;
+  ServerUrlEdit.Width := 400;
+  ServerUrlEdit.Text := 'http://localhost:8000';
+
   { Hint }
   Hint := TNewStaticText.Create(SetupPage);
   Hint.Parent := SetupPage.Surface;
   Hint.Caption :=
-    'Model: Qwen3.5-Plus (via https://coding.dashscope.aliyuncs.com/v1)' + #13#10 +
-    '' + #13#10 +
-    'If you leave a field blank, the recorder will prompt you interactively' + #13#10 +
-    'on first run and save your answers to model_config.json.';
-  Hint.Top := 175;
+    'Model: Qwen3.5-Plus (via DashScope)' + #13#10 +
+    'If you leave Employee ID or API Key blank, the recorder will' + #13#10 +
+    'prompt you on first run.';
+  Hint.Top := 248;
   Hint.Left := 0;
   Hint.Font.Color := clGray;
   Hint.AutoSize := True;
@@ -186,8 +201,8 @@ begin
     Lines.Add('    "interval_seconds": 15');
     Lines.Add('  },');
     Lines.Add('  "server": {');
-    Lines.Add('    "enabled": false,');
-    Lines.Add('    "url": "http://127.0.0.1:8000",');
+    Lines.Add('    "enabled": true,');
+    Lines.Add('    "url": "' + JsonEscape(Trim(ServerUrlEdit.Text)) + '",');
     Lines.Add('    "api_key": "",');
     Lines.Add('    "buffer_path": "./logs/push_buffer.jsonl"');
     Lines.Add('  }');
