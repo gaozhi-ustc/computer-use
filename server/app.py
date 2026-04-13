@@ -18,6 +18,7 @@ Run:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
@@ -198,3 +199,13 @@ def list_frames(
     total = db.count_frames(employee_id=employee_id, session_id=session_id)
     frames = [FrameOut(**r) for r in rows]
     return FrameListResult(total=total, count=len(frames), frames=frames)
+
+
+# ---------------------------------------------------------------------------
+# Static file serving for production (Vue dashboard)
+# ---------------------------------------------------------------------------
+
+_dashboard_dist = Path(__file__).resolve().parent.parent / "dashboard" / "dist"
+if _dashboard_dist.is_dir():
+    from starlette.staticfiles import StaticFiles
+    app.mount("/", StaticFiles(directory=str(_dashboard_dist), html=True), name="dashboard")
