@@ -24,6 +24,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from server import db
+from server.auth_router import router as auth_router
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +119,7 @@ app = FastAPI(
     description="Receives per-frame vision analyses from recorder clients.",
     version="0.1.0",
 )
+app.include_router(auth_router)
 
 
 @app.on_event("startup")
