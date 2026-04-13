@@ -166,8 +166,85 @@ def insert_frame(frame: dict[str, Any]) -> Optional[int]:
         return cur.lastrowid
 
 
+def list_sessions(
+    employee_id: str | None = None,
+    employee_ids: list[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """List distinct sessions with aggregated metadata.
+
+    Returns dicts with: session_id, employee_id, first_frame_at, last_frame_at,
+    frame_count, applications (JSON array of distinct apps).
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if employee_id:
+        clauses.append("employee_id = ?")
+        params.append(employee_id)
+    if employee_ids:
+        placeholders = ",".join("?" * len(employee_ids))
+        clauses.append(f"employee_id IN ({placeholders})")
+        params.extend(employee_ids)
+    if date_from:
+        clauses.append("recorded_at >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("recorded_at <= ?")
+        params.append(date_to)
+
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    params.extend([limit, offset])
+
+    sql = f"""
+        SELECT session_id, employee_id,
+               MIN(recorded_at) as first_frame_at,
+               MAX(recorded_at) as last_frame_at,
+               COUNT(*) as frame_count,
+               GROUP_CONCAT(DISTINCT application) as applications
+        FROM frames {where}
+        GROUP BY session_id, employee_id
+        ORDER BY MAX(recorded_at) DESC
+        LIMIT ? OFFSET ?
+    """
+    with connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        apps_str = d.pop("applications", "") or ""
+        d["applications"] = [a for a in apps_str.split(",") if a]
+        result.append(d)
+    return result
+
+
+def count_sessions(
+    employee_id: str | None = None,
+    employee_ids: list[str] | None = None,
+) -> int:
+    """Return the number of distinct sessions matching the filters."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if employee_id:
+        clauses.append("employee_id = ?")
+        params.append(employee_id)
+    if employee_ids:
+        placeholders = ",".join("?" * len(employee_ids))
+        clauses.append(f"employee_id IN ({placeholders})")
+        params.extend(employee_ids)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    with connect() as conn:
+        (count,) = conn.execute(
+            f"SELECT COUNT(DISTINCT session_id) FROM frames {where}", params
+        ).fetchone()
+    return int(count)
+
+
 def query_frames(
     employee_id: Optional[str] = None,
+    employee_ids: list[str] | None = None,
     session_id: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
@@ -178,6 +255,10 @@ def query_frames(
     if employee_id:
         clauses.append("employee_id = ?")
         params.append(employee_id)
+    if employee_ids:
+        placeholders = ",".join("?" * len(employee_ids))
+        clauses.append(f"employee_id IN ({placeholders})")
+        params.extend(employee_ids)
     if session_id:
         clauses.append("session_id = ?")
         params.append(session_id)
@@ -201,6 +282,7 @@ def query_frames(
 
 def count_frames(
     employee_id: Optional[str] = None,
+    employee_ids: list[str] | None = None,
     session_id: Optional[str] = None,
 ) -> int:
     """Return the number of frames matching the filters."""
@@ -209,6 +291,10 @@ def count_frames(
     if employee_id:
         clauses.append("employee_id = ?")
         params.append(employee_id)
+    if employee_ids:
+        placeholders = ",".join("?" * len(employee_ids))
+        clauses.append(f"employee_id IN ({placeholders})")
+        params.extend(employee_ids)
     if session_id:
         clauses.append("session_id = ?")
         params.append(session_id)
