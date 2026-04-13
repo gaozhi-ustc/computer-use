@@ -28,6 +28,7 @@ from server import db
 from server.auth_router import router as auth_router
 from server.sessions_router import router as sessions_router
 from server.sops_router import router as sops_router
+from server.stats_router import router as stats_router
 from server.users_router import router as users_router
 
 
@@ -126,6 +127,7 @@ app = FastAPI(
 app.include_router(auth_router)
 app.include_router(sessions_router)
 app.include_router(sops_router)
+app.include_router(stats_router)
 app.include_router(users_router)
 
 
