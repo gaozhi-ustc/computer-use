@@ -570,6 +570,209 @@ def reorder_sop_steps(sop_id: int, step_ids: list[int]) -> None:
             )
 
 
+# ---------------------------------------------------------------------------
+# Stats / Analytics / Search
+# ---------------------------------------------------------------------------
+
+
+def get_app_usage_stats(
+    employee_id: str | None = None,
+    employee_ids: list[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return app usage distribution: [{application, frame_count, ...}]"""
+    clauses, params = _build_employee_clauses(employee_id, employee_ids)
+    if date_from:
+        clauses.append("recorded_at >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("recorded_at <= ?")
+        params.append(date_to)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT application, COUNT(*) as frame_count
+            FROM frames {where}
+            GROUP BY application ORDER BY frame_count DESC
+            """,
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_activity_heatmap(
+    employee_id: str | None = None,
+    employee_ids: list[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return hourly activity data: [{hour: 0-23, weekday: 0-6, count: N}]"""
+    clauses, params = _build_employee_clauses(employee_id, employee_ids)
+    if date_from:
+        clauses.append("recorded_at >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("recorded_at <= ?")
+        params.append(date_to)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT CAST(strftime('%H', recorded_at) AS INTEGER) as hour,
+                   CAST(strftime('%w', recorded_at) AS INTEGER) as weekday,
+                   COUNT(*) as count
+            FROM frames {where}
+            GROUP BY hour, weekday
+            """,
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_daily_active_stats(
+    employee_id: str | None = None,
+    employee_ids: list[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return daily activity: [{date, frame_count, app_count, first_at, last_at}]"""
+    clauses, params = _build_employee_clauses(employee_id, employee_ids)
+    if date_from:
+        clauses.append("recorded_at >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("recorded_at <= ?")
+        params.append(date_to)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT DATE(recorded_at) as date,
+                   COUNT(*) as frame_count,
+                   COUNT(DISTINCT application) as app_count,
+                   MIN(recorded_at) as first_at,
+                   MAX(recorded_at) as last_at
+            FROM frames {where}
+            GROUP BY date ORDER BY date DESC LIMIT 30
+            """,
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def search_frames(
+    keyword: str | None = None,
+    employee_id: str | None = None,
+    employee_ids: list[str] | None = None,
+    application: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    min_confidence: float | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Full-text search across frames. Returns (rows, total_count)."""
+    clauses, params = _build_employee_clauses(employee_id, employee_ids)
+    if keyword:
+        clauses.append("(user_action LIKE ? OR text_content LIKE ?)")
+        params.extend([f"%{keyword}%", f"%{keyword}%"])
+    if application:
+        clauses.append("application = ?")
+        params.append(application)
+    if date_from:
+        clauses.append("recorded_at >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("recorded_at <= ?")
+        params.append(date_to)
+    if min_confidence is not None:
+        clauses.append("confidence >= ?")
+        params.append(min_confidence)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+
+    with connect() as conn:
+        (total,) = conn.execute(
+            f"SELECT COUNT(*) FROM frames {where}", params
+        ).fetchone()
+        rows = conn.execute(
+            f"""
+            SELECT id, employee_id, session_id, frame_index, recorded_at,
+                   application, window_title, user_action, text_content,
+                   confidence
+            FROM frames {where}
+            ORDER BY recorded_at DESC LIMIT ? OFFSET ?
+            """,
+            params + [limit, offset],
+        ).fetchall()
+    return [dict(r) for r in rows], int(total)
+
+
+def get_dashboard_summary(employee_ids: list[str] | None = None) -> dict[str, Any]:
+    """Summary stats for the dashboard overview."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def _where(extra_clauses: list[str] | None = None) -> tuple[str, list[Any]]:
+        clauses = list(extra_clauses or [])
+        params: list[Any] = []
+        if employee_ids is not None:
+            ph = ",".join("?" * len(employee_ids))
+            clauses.append(f"employee_id IN ({ph})")
+            params.extend(employee_ids)
+        w = "WHERE " + " AND ".join(clauses) if clauses else ""
+        return w, params
+
+    with connect() as conn:
+        # Today's frames
+        w, p = _where(["DATE(recorded_at) = ?"])
+        (today_frames,) = conn.execute(
+            f"SELECT COUNT(*) FROM frames {w}", p + [today]
+        ).fetchone()
+
+        # Active sessions (today)
+        (today_sessions,) = conn.execute(
+            f"SELECT COUNT(DISTINCT session_id) FROM frames {w}", p + [today]
+        ).fetchone()
+
+        # SOP counts
+        (draft_sops,) = conn.execute(
+            "SELECT COUNT(*) FROM sops WHERE status = 'draft'"
+        ).fetchone()
+        (published_sops,) = conn.execute(
+            "SELECT COUNT(*) FROM sops WHERE status = 'published'"
+        ).fetchone()
+
+        # Total employees (distinct in frames)
+        w2, p2 = _where()
+        (total_employees,) = conn.execute(
+            f"SELECT COUNT(DISTINCT employee_id) FROM frames {w2}", p2
+        ).fetchone()
+
+    return {
+        "today_frames": int(today_frames),
+        "today_sessions": int(today_sessions),
+        "draft_sops": int(draft_sops),
+        "published_sops": int(published_sops),
+        "total_employees": int(total_employees),
+    }
+
+
+def _build_employee_clauses(
+    employee_id: str | None, employee_ids: list[str] | None
+) -> tuple[list[str], list[Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if employee_id:
+        clauses.append("employee_id = ?")
+        params.append(employee_id)
+    if employee_ids:
+        ph = ",".join("?" * len(employee_ids))
+        clauses.append(f"employee_id IN ({ph})")
+        params.extend(employee_ids)
+    return clauses, params
+
+
 def _ts_to_iso(ts: Any) -> str:
     """Convert a unix timestamp (float) to ISO-8601, or echo a pre-formatted string."""
     if isinstance(ts, (int, float)):
