@@ -46,8 +46,16 @@ class AnalysisConfig(BaseModel):
 
 class SessionConfig(BaseModel):
     idle_timeout_seconds: float = 60.0
-    max_duration_seconds: float = 3600.0
+    max_duration_seconds: float = 0.0  # 0 = unlimited, run until Ctrl+C
     similarity_threshold: float = 0.95
+
+
+class IdleDetectionConfig(BaseModel):
+    """Backoff capture interval when user is idle (no mouse/keyboard input)."""
+    enabled: bool = True
+    idle_threshold_seconds: float = 60.0  # how long without input -> idle
+    max_interval_seconds: float = 300.0   # cap on backed-off interval (5 min)
+    backoff_factor: float = 2.0           # multiply interval by this each idle tick
 
 
 class AggregationConfig(BaseModel):
@@ -91,6 +99,7 @@ class AppConfig(BaseModel):
     output: OutputConfig = Field(default_factory=OutputConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
+    idle_detection: IdleDetectionConfig = Field(default_factory=IdleDetectionConfig)
 
     @model_validator(mode="before")
     @classmethod

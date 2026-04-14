@@ -15,7 +15,7 @@ def test_default_config():
     config = AppConfig()
     assert config.capture.interval_seconds == 3.0
     assert config.analysis.model == "gpt-4o"
-    assert config.session.max_duration_seconds == 3600.0
+    assert config.session.max_duration_seconds == 0.0
 
 
 def test_base_url_default_empty():
@@ -42,7 +42,7 @@ def test_load_config_from_yaml():
     assert config.capture.interval_seconds == 5.0
     assert config.analysis.model == "gpt-4o-mini"
     # Defaults preserved
-    assert config.session.max_duration_seconds == 3600.0
+    assert config.session.max_duration_seconds == 0.0
 
 
 def test_load_config_from_toml(tmp_path):
@@ -62,7 +62,7 @@ base_url = "https://proxy.example.com/v1"
     assert config.analysis.model == "gpt-4o-mini"
     assert config.analysis.base_url == "https://proxy.example.com/v1"
     # Defaults preserved
-    assert config.session.max_duration_seconds == 3600.0
+    assert config.session.max_duration_seconds == 0.0
 
 
 def test_env_var_interpolation(monkeypatch):

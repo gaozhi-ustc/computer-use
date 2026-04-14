@@ -49,8 +49,12 @@ def _print_banner(config) -> None:
     """Print startup information to console."""
     output_dir = Path(config.output.directory).resolve()
     duration = config.session.max_duration_seconds
-    mins = int(duration // 60)
-    secs = int(duration % 60)
+    if duration <= 0:
+        duration_str = "unlimited (Ctrl+C to stop)"
+    else:
+        mins = int(duration // 60)
+        secs = int(duration % 60)
+        duration_str = f"{mins}m {secs}s"
 
     print()
     print("=" * 58)
@@ -61,9 +65,15 @@ def _print_banner(config) -> None:
     has_key = "***" + config.analysis.openai_api_key[-4:] if len(config.analysis.openai_api_key) > 4 else "(not set)"
     server_status = config.server.url if config.server.enabled else "disabled"
 
+    if config.idle_detection.enabled:
+        idle_str = (f"idle backoff: >{int(config.idle_detection.idle_threshold_seconds)}s "
+                    f"-> up to {int(config.idle_detection.max_interval_seconds)}s")
+    else:
+        idle_str = "idle backoff: disabled"
+
     print(f"  Employee ID:          {config.employee_id or '(not set)'}")
-    print(f"  Screenshot interval:  {config.capture.interval_seconds}s")
-    print(f"  Max recording time:   {mins}m {secs}s")
+    print(f"  Screenshot interval:  {config.capture.interval_seconds}s ({idle_str})")
+    print(f"  Max recording time:   {duration_str}")
     print(f"  Model:                {config.analysis.model}")
     print(f"  API endpoint:         {base}")
     print(f"  API key:              {has_key}")

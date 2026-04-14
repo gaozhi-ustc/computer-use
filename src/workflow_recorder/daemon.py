@@ -160,10 +160,11 @@ class Daemon:
                  session_id=self.session.session_id,
                  interval=self.config.capture.interval_seconds)
 
+        max_duration = self.config.session.max_duration_seconds
         try:
-            # Block until stop signal or max duration
+            # Block until stop signal or max duration (0 = unlimited).
             while not self._stop_event.is_set():
-                if self.session.elapsed >= self.config.session.max_duration_seconds:
+                if max_duration > 0 and self.session.elapsed >= max_duration:
                     log.info("max_duration_reached")
                     break
                 self._stop_event.wait(timeout=1.0)
@@ -179,11 +180,49 @@ class Daemon:
             self.session.stop()
 
     def _capture_loop(self) -> None:
-        """Periodically capture screenshots."""
-        interval = self.config.capture.interval_seconds
+        """Periodically capture screenshots, with idle backoff."""
+        from workflow_recorder.capture.idle_detector import IdleBackoff, IdleDetector
+
+        idle_cfg = self.config.idle_detection
+        base_interval = self.config.capture.interval_seconds
+
+        if idle_cfg.enabled:
+            detector = IdleDetector()
+            backoff = IdleBackoff(
+                base_interval=base_interval,
+                max_interval=idle_cfg.max_interval_seconds,
+                idle_threshold_seconds=idle_cfg.idle_threshold_seconds,
+                backoff_factor=idle_cfg.backoff_factor,
+            )
+            log.info("capture_loop_started",
+                     base_interval=base_interval,
+                     idle_backoff=detector.available,
+                     max_interval=idle_cfg.max_interval_seconds)
+        else:
+            detector = None
+            backoff = None
+            log.info("capture_loop_started",
+                     base_interval=base_interval,
+                     idle_backoff=False)
+
+        last_logged_interval = base_interval
+
         while not self._stop_event.is_set():
             if self.session:
                 self.session.capture_once()
+
+            if backoff and detector:
+                idle_secs = detector.seconds_since_last_input()
+                interval = backoff.update(idle_secs)
+                # Log when interval changes meaningfully (idle entry / wake)
+                if abs(interval - last_logged_interval) > 0.1:
+                    log.info("capture_interval_changed",
+                             new_interval=interval,
+                             idle_seconds=round(idle_secs, 1))
+                    last_logged_interval = interval
+            else:
+                interval = base_interval
+
             self._stop_event.wait(timeout=interval)
 
         log.info("capture_loop_stopped")
