@@ -304,7 +304,8 @@ def query_frames(
     sql = (
         "SELECT id, employee_id, session_id, frame_index, recorded_at, "
         "received_at, application, window_title, user_action, text_content, "
-        "confidence, mouse_position_json, ui_elements_json, context_data_json "
+        "confidence, mouse_position_json, ui_elements_json, context_data_json, "
+        "image_path, analysis_status, cursor_x, cursor_y, focus_rect_json "
         f"FROM frames {where} "
         "ORDER BY recorded_at DESC, frame_index DESC "
         "LIMIT ? OFFSET ?"
@@ -837,4 +838,197 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         d["context_data"] = json.loads(raw_ctx) if raw_ctx else {}
     except json.JSONDecodeError:
         d["context_data"] = {}
+    # focus_rect (list or None) — only present when query selects focus_rect_json
+    if "focus_rect_json" in d:
+        raw_focus = d.pop("focus_rect_json", None)
+        try:
+            d["focus_rect"] = json.loads(raw_focus) if raw_focus else None
+        except json.JSONDecodeError:
+            d["focus_rect"] = None
+    return d
+
+
+# ---------------------------------------------------------------------------
+# Offline analysis queue (Phase 1 of offline-analysis architecture)
+# ---------------------------------------------------------------------------
+
+
+def insert_pending_frame(
+    employee_id: str,
+    session_id: str,
+    frame_index: int,
+    timestamp: float,
+    image_path: str,
+    cursor_x: int = -1,
+    cursor_y: int = -1,
+    focus_rect: list[int] | None = None,
+) -> int | None:
+    """Insert a frame in 'pending' state, awaiting analysis.
+
+    Returns the row id, or None on UNIQUE collision (retry of the same frame).
+    """
+    received_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    recorded_at = _ts_to_iso(timestamp)
+    focus_json = json.dumps(focus_rect) if focus_rect else ""
+
+    with connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO frames (
+                employee_id, session_id, frame_index,
+                recorded_at, received_at,
+                application, window_title, user_action, text_content,
+                confidence, mouse_position_json, ui_elements_json, context_data_json,
+                image_path, analysis_status, analysis_attempts,
+                cursor_x, cursor_y, focus_rect_json
+            ) VALUES (?, ?, ?, ?, ?, '', '', '', '', 0.0, '[]', '[]', '{}',
+                      ?, 'pending', 0, ?, ?, ?)
+            """,
+            (employee_id, session_id, frame_index, recorded_at, received_at,
+             image_path, cursor_x, cursor_y, focus_json),
+        )
+        if cur.rowcount == 0:
+            return None
+        return cur.lastrowid
+
+
+def claim_next_pending_frame() -> dict[str, Any] | None:
+    """Atomically claim the oldest pending frame for analysis.
+
+    Sets status='running', increments analysis_attempts, returns the row.
+    Returns None if no pending frames available.
+    """
+    with connect() as conn:
+        row = conn.execute(
+            """
+            UPDATE frames
+            SET analysis_status = 'running',
+                analysis_attempts = analysis_attempts + 1
+            WHERE id = (
+                SELECT id FROM frames
+                WHERE analysis_status = 'pending'
+                ORDER BY id ASC
+                LIMIT 1
+            )
+            RETURNING id, employee_id, session_id, frame_index, image_path,
+                      cursor_x, cursor_y, focus_rect_json, analysis_attempts,
+                      recorded_at
+            """,
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    raw_focus = d.pop("focus_rect_json", None)
+    try:
+        d["focus_rect"] = json.loads(raw_focus) if raw_focus else None
+    except (json.JSONDecodeError, TypeError):
+        d["focus_rect"] = None
+    return d
+
+
+def mark_frame_done(frame_id: int, analysis: dict[str, Any]) -> None:
+    """Write analysis results and transition to 'done'."""
+    analyzed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE frames SET
+                analysis_status = 'done',
+                analysis_error = '',
+                analyzed_at = ?,
+                application = ?,
+                window_title = ?,
+                user_action = ?,
+                text_content = ?,
+                confidence = ?,
+                mouse_position_json = ?,
+                ui_elements_json = ?,
+                context_data_json = ?
+            WHERE id = ?
+            """,
+            (
+                analyzed_at,
+                analysis.get("application", ""),
+                analysis.get("window_title", ""),
+                analysis.get("user_action", ""),
+                analysis.get("text_content", ""),
+                float(analysis.get("confidence", 0.0)),
+                json.dumps(analysis.get("mouse_position_estimate") or [], ensure_ascii=False),
+                json.dumps(analysis.get("ui_elements_visible") or [], ensure_ascii=False),
+                json.dumps(analysis.get("context_data") or {}, ensure_ascii=False),
+                frame_id,
+            ),
+        )
+
+
+def mark_frame_failed(frame_id: int, reason: str) -> None:
+    """Transition to 'failed' with error reason."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE frames SET analysis_status = 'failed', analysis_error = ? WHERE id = ?",
+            (reason, frame_id),
+        )
+
+
+def reset_frame_to_pending(frame_id: int, clear_attempts: bool = False) -> None:
+    """Put a frame back into 'pending' (either for retry or admin-triggered reset)."""
+    with connect() as conn:
+        if clear_attempts:
+            conn.execute(
+                "UPDATE frames SET analysis_status = 'pending', "
+                "analysis_attempts = 0, analysis_error = '' WHERE id = ?",
+                (frame_id,),
+            )
+        else:
+            conn.execute(
+                "UPDATE frames SET analysis_status = 'pending' WHERE id = ?",
+                (frame_id,),
+            )
+
+
+def get_analysis_queue_stats() -> dict[str, int]:
+    """Return counts per analysis_status value."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT analysis_status, COUNT(*) as n FROM frames GROUP BY analysis_status"
+        ).fetchall()
+    stats = {"pending": 0, "running": 0, "failed": 0, "done": 0}
+    for r in rows:
+        status = r["analysis_status"]
+        if status in stats:
+            stats[status] = int(r["n"])
+    return stats
+
+
+def get_frame(frame_id: int) -> dict[str, Any] | None:
+    """Return a single frame by id with deserialized JSON fields."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM frames WHERE id = ?", (frame_id,)
+        ).fetchone()
+    if not row:
+        return None
+    return _frame_row_to_dict(row)
+
+
+def _frame_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    """Deserialize a frames row including all JSON columns + focus_rect."""
+    d = dict(row)
+    for key in ("mouse_position_json", "ui_elements_json"):
+        raw = d.pop(key, None)
+        out_key = key.replace("_json", "")
+        try:
+            d[out_key] = json.loads(raw) if raw else []
+        except (json.JSONDecodeError, TypeError):
+            d[out_key] = []
+    raw_ctx = d.pop("context_data_json", None)
+    try:
+        d["context_data"] = json.loads(raw_ctx) if raw_ctx else {}
+    except (json.JSONDecodeError, TypeError):
+        d["context_data"] = {}
+    raw_focus = d.pop("focus_rect_json", None)
+    try:
+        d["focus_rect"] = json.loads(raw_focus) if raw_focus else None
+    except (json.JSONDecodeError, TypeError):
+        d["focus_rect"] = None
     return d

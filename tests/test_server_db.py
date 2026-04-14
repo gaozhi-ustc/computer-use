@@ -291,3 +291,170 @@ def test_migration_adds_status_index(fresh_db):
             "SELECT name FROM sqlite_master WHERE type='index'"
         ).fetchall()}
     assert "idx_frames_status" in idx_names
+
+
+# ---------------------------------------------------------------------------
+# Offline analysis — queue helpers (Task 2)
+# ---------------------------------------------------------------------------
+
+
+def test_insert_pending_frame(fresh_db):
+    from server.db import insert_pending_frame, get_frame
+    frame_id = insert_pending_frame(
+        employee_id="E001",
+        session_id="sess-a",
+        frame_index=1,
+        timestamp=1712856000.0,
+        image_path="/tmp/test/1.png",
+        cursor_x=500,
+        cursor_y=300,
+        focus_rect=[100, 100, 300, 200],
+    )
+    assert frame_id == 1
+    frame = get_frame(frame_id)
+    assert frame["analysis_status"] == "pending"
+    assert frame["image_path"] == "/tmp/test/1.png"
+    assert frame["cursor_x"] == 500
+    assert frame["cursor_y"] == 300
+    assert frame["focus_rect"] == [100, 100, 300, 200]
+
+
+def test_insert_pending_frame_without_optional_fields(fresh_db):
+    from server.db import insert_pending_frame, get_frame
+    frame_id = insert_pending_frame(
+        employee_id="E001", session_id="sess-a", frame_index=1,
+        timestamp=1712856000.0, image_path="/tmp/1.png",
+    )
+    frame = get_frame(frame_id)
+    assert frame["cursor_x"] == -1
+    assert frame["cursor_y"] == -1
+    assert frame["focus_rect"] is None
+
+
+def test_claim_next_pending_frame_returns_oldest(fresh_db):
+    from server.db import insert_pending_frame, claim_next_pending_frame
+    insert_pending_frame(employee_id="E1", session_id="s", frame_index=1,
+                         timestamp=100.0, image_path="/tmp/1.png")
+    insert_pending_frame(employee_id="E1", session_id="s", frame_index=2,
+                         timestamp=200.0, image_path="/tmp/2.png")
+    frame = claim_next_pending_frame()
+    assert frame is not None
+    assert frame["frame_index"] == 1
+    assert frame["analysis_attempts"] == 1  # incremented on claim
+
+
+def test_claim_next_pending_frame_returns_none_when_empty(fresh_db):
+    from server.db import claim_next_pending_frame
+    assert claim_next_pending_frame() is None
+
+
+def test_claim_next_pending_frame_skips_running_and_done_and_failed(fresh_db):
+    from server.db import insert_pending_frame, claim_next_pending_frame, mark_frame_done, mark_frame_failed
+    # frame 1 - will be marked done
+    id1 = insert_pending_frame(employee_id="E1", session_id="s", frame_index=1,
+                               timestamp=1.0, image_path="/tmp/1.png")
+    # frame 2 - will be marked failed
+    id2 = insert_pending_frame(employee_id="E1", session_id="s", frame_index=2,
+                               timestamp=2.0, image_path="/tmp/2.png")
+    # frame 3 - stays pending
+    id3 = insert_pending_frame(employee_id="E1", session_id="s", frame_index=3,
+                               timestamp=3.0, image_path="/tmp/3.png")
+
+    # Claim id1 and mark done
+    claim_next_pending_frame()
+    mark_frame_done(id1, {"application": "Chrome", "user_action": "test",
+                          "window_title": "", "text_content": "",
+                          "confidence": 0.9, "ui_elements_visible": [],
+                          "mouse_position_estimate": [], "context_data": {},
+                          "timestamp": 1.0, "frame_index": 1})
+    # Claim id2 and mark failed
+    claim_next_pending_frame()
+    mark_frame_failed(id2, "test failure")
+
+    # Next claim should return id3
+    next_frame = claim_next_pending_frame()
+    assert next_frame is not None
+    assert next_frame["id"] == id3
+
+
+def test_mark_frame_done_updates_analysis_fields(fresh_db):
+    from server.db import insert_pending_frame, mark_frame_done, get_frame
+    fid = insert_pending_frame(employee_id="E1", session_id="s", frame_index=1,
+                               timestamp=100.0, image_path="/tmp/1.png")
+    result = {
+        "application": "Chrome",
+        "window_title": "GitHub",
+        "user_action": "scrolling",
+        "text_content": "readme",
+        "confidence": 0.9,
+        "ui_elements_visible": [{"name": "button", "element_type": "button", "coordinates": [1, 2]}],
+        "mouse_position_estimate": [100, 200],
+        "context_data": {"page_title": "README"},
+        "timestamp": 100.0,
+        "frame_index": 1,
+    }
+    mark_frame_done(fid, result)
+    frame = get_frame(fid)
+    assert frame["analysis_status"] == "done"
+    assert frame["application"] == "Chrome"
+    assert frame["user_action"] == "scrolling"
+    assert frame["confidence"] == 0.9
+    assert frame["context_data"] == {"page_title": "README"}
+    assert frame["ui_elements"][0]["name"] == "button"
+    assert frame["analyzed_at"] != ""
+
+
+def test_mark_frame_failed_records_error(fresh_db):
+    from server.db import insert_pending_frame, mark_frame_failed, get_frame
+    fid = insert_pending_frame(employee_id="E1", session_id="s", frame_index=1,
+                               timestamp=100.0, image_path="/tmp/1.png")
+    mark_frame_failed(fid, "401 unauthorized")
+    frame = get_frame(fid)
+    assert frame["analysis_status"] == "failed"
+    assert frame["analysis_error"] == "401 unauthorized"
+
+
+def test_reset_frame_to_pending_from_running(fresh_db):
+    from server.db import insert_pending_frame, claim_next_pending_frame, reset_frame_to_pending, get_frame
+    fid = insert_pending_frame(employee_id="E1", session_id="s", frame_index=1,
+                               timestamp=100.0, image_path="/tmp/1.png")
+    claim_next_pending_frame()  # now running, attempts=1
+    reset_frame_to_pending(fid)
+    frame = get_frame(fid)
+    assert frame["analysis_status"] == "pending"
+    assert frame["analysis_attempts"] == 1  # not cleared by default
+
+
+def test_reset_frame_to_pending_with_clear_attempts(fresh_db):
+    from server.db import insert_pending_frame, claim_next_pending_frame, mark_frame_failed, reset_frame_to_pending, get_frame
+    fid = insert_pending_frame(employee_id="E1", session_id="s", frame_index=1,
+                               timestamp=100.0, image_path="/tmp/1.png")
+    claim_next_pending_frame()
+    mark_frame_failed(fid, "oops")
+    reset_frame_to_pending(fid, clear_attempts=True)
+    frame = get_frame(fid)
+    assert frame["analysis_status"] == "pending"
+    assert frame["analysis_attempts"] == 0
+
+
+def test_queue_stats(fresh_db):
+    from server.db import insert_pending_frame, claim_next_pending_frame, mark_frame_done, mark_frame_failed, get_analysis_queue_stats
+    # Seed 4 frames in different states
+    for i in range(1, 5):
+        insert_pending_frame(employee_id="E1", session_id="s", frame_index=i,
+                             timestamp=float(i), image_path=f"/tmp/{i}.png")
+    # Claim first, mark done
+    f1 = claim_next_pending_frame()
+    mark_frame_done(f1["id"], {
+        "application": "", "window_title": "", "user_action": "", "text_content": "",
+        "confidence": 0.0, "ui_elements_visible": [], "mouse_position_estimate": [],
+        "context_data": {}, "timestamp": 1.0, "frame_index": 1,
+    })
+    # Claim second, mark failed
+    f2 = claim_next_pending_frame()
+    mark_frame_failed(f2["id"], "x")
+    # Claim third, leave running
+    claim_next_pending_frame()
+    # Fourth stays pending
+    stats = get_analysis_queue_stats()
+    assert stats == {"pending": 1, "running": 1, "failed": 1, "done": 1}
