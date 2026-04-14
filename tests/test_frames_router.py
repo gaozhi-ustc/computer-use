@@ -15,7 +15,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("WORKFLOW_IMAGE_DIR", str(tmp_path / "frame_images"))
     monkeypatch.setenv("WORKFLOW_SERVER_KEY", "test-upload-key")
     monkeypatch.setenv("DASHBOARD_SECRET_KEY", "test-secret")
-    # Avoid AnalysisPool warnings during tests (no api_keys.txt)
+    monkeypatch.setenv("WORKFLOW_DISABLE_ANALYSIS_POOL", "1")
     from server.app import app
     from server import db
     from server.auth import hash_password
