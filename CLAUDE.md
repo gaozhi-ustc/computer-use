@@ -2,46 +2,72 @@
 
 ## 项目概述
 
-Windows 后台常驻截屏分析 daemon，通过 **Qwen3.5-Plus 视觉模型**（阿里百炼 DashScope）理解员工桌面操作，输出可被 computer-use 自动化工具复现的结构化工作流文档，并将每帧识别结果**实时推送到中心服务器**（FastAPI + SQLite）按员工 ID 归档。
+Windows 后台常驻截屏 daemon，每 3 秒捕获屏幕 + OS 级鼠标/焦点坐标，**上传原图到服务端**。服务端从 `api_keys.txt` 读取多把 DashScope key，**每把 key 一个 worker 线程**并行调用 **Qwen3.5-Plus 视觉模型**分析每帧，结果按员工 ID 归档到 SQLite。
 
-配套 **Web Dashboard**（Vue 3 + Naive UI）提供：SOP 自动提炼与编辑、效率分析、合规审计、用户管理。
+配套 **Web Dashboard**（Vue 3 + Naive UI）提供：录制回放（图片+AI 分析+鼠标红框/焦点黄框 overlay）、SOP 自动提炼与编辑、效率分析、合规审计、用户管理、分析队列监控。
 
-## 架构
+## 架构（v0.4.0 离线分析）
 
 ```
 客户端（每台员工机器一份）:
-[Capture] → [Analysis (qwen3.5-plus)] ─┬─→ 本地 Workflow JSON（aggregation）
-                                         │
-                                         └─→ [FramePusher thread] ─httpx POST─▶ 服务端
-                                                    │
-                                                失败回落
-                                                    ▼
-                                               logs/push_buffer.jsonl
-                                               (下次启动时重推)
+[Capture every 3s]
+  ├─ mss screenshot
+  ├─ GetCursorPos() → cursor_x, cursor_y
+  └─ GetFocus() + GetWindowRect() → focus_rect
+  │
+  ▼
+[ImageUploader thread] ─multipart POST─▶ /frames/upload (X-API-Key)
+  │                                              │
+  ├─ 失败回落                                    │
+  │   ▼                                          │
+  │ logs/push_buffer.jsonl                       │
+  │ (下次启动时重推)                              │
+  └─ idle 空闲退避（无键鼠事件时指数增加间隔）       │
 
-服务端（单点部署）:
-FastAPI
-├── POST /frames, /frames/batch          ← 客户端推送（X-API-Key 鉴权）
-├── /api/auth/*                          ← JWT 登录 / 刷新 / 当前用户
-├── /api/users/*                         ← 用户管理（admin only）
-├── /api/sessions/*                      ← 录制 session 列表 / 详情
-├── /api/sops/*                          ← SOP CRUD / 状态流转 / 导出
-├── /api/dashboard/*, /api/frames/stats  ← 概览 / 效率统计 / 审计搜索
-└── / (StaticFiles)                      ← Vue 3 SPA（production 模式）
-   │
-   ▼
+服务端（单点部署）:                                │
+                                                 ▼
+[FastAPI]  /frames/upload  →  save PNG to frame_images/<emp>/<date>/<session>/<idx>.png
+                          →  INSERT frames (analysis_status='pending', image_path=...)
+                                                 │
+                                                 ▼
+[AnalysisPool] — 启动时读取 ./api_keys.txt（一行一 key）
+  ├─ worker-0 (key #0) ─┐
+  ├─ worker-1 (key #1) ─┤  每个 worker 独立循环:
+  ├─ worker-2 (key #2) ─┤    frame = claim_next_pending()  (原子 UPDATE…RETURNING)
+  └─ worker-N (key #N) ─┘    result = VisionClient.analyze_frame(image)
+                             mark_frame_done(result) | mark_frame_failed (3 次后)
+
+FastAPI 对 Dashboard 暴露:
+├── POST /frames/upload                 ← 客户端推送（X-API-Key）
+├── GET  /api/frames/:id/image          ← 原图服务（JWT + 角色过滤）
+├── POST /api/frames/:id/retry          ← 失败帧重试（admin only）
+├── GET  /api/frames/queue              ← 队列状态（admin only）
+├── /api/auth/*                         ← JWT 登录 / 刷新 / 当前用户
+├── /api/users/*                        ← 用户管理（admin only）
+├── /api/sessions/*                     ← 录制 session 列表 / 详情
+├── /api/sops/*                         ← SOP CRUD / 状态流转 / 导出
+├── /api/dashboard/*, /api/frames/stats ← 概览 / 效率统计 / 审计搜索
+└── / (StaticFiles)                     ← Vue 3 SPA（production 模式）
+
 SQLite (frames.db)
-├── frames   — UNIQUE(employee_id, session_id, frame_index)  幂等去重
+├── frames   — UNIQUE(employee_id, session_id, frame_index)
+│              + image_path / analysis_status / cursor_x,y / focus_rect_json
 ├── users    — 用户账号 + 角色 + 钉钉关联
 ├── sops     — SOP 元信息（草稿/审核/已发布）
 └── sop_steps — SOP 步骤（可排序、可编辑）
+
+filesystem: ./frame_images/<employee_id>/<YYYY-MM-DD>/<session_id>/<frame_index>.png
+            永久保留（v0.4.0 无自动清理）
 ```
 
-- **三线程客户端**: 截屏 / 分析 / 推送通过有界队列解耦，互不阻塞
-- **隐私优先**: 应用排除名单 + 区域遮罩，在 API 调用前执行
-- **推送解耦**: `FramePusher` 独立线程 + JSONL buffer 兜底，断网不丢数据
-- **首次运行向导**: `init_wizard.py` 检测 `employee_id` / `openai_api_key` 缺失则交互式 prompt
-- **角色权限**: admin（全量）/ manager（部门）/ employee（仅自己），服务端强制过滤
+- **单线程客户端**：capture → upload，不再本地分析。默认 3 秒间隔（空闲时退避到 300s）
+- **隐私优先**：应用排除名单 + 区域遮罩，在上传前执行
+- **上传解耦**：`ImageUploader` 独立线程 + JSONL buffer 兜底，断网不丢数据
+- **服务端并行分析**：N 把 key → N 个 worker，单把 key 挂掉不影响其他 worker
+- **3 次重试**：分析失败自动重入 pending；3 次后标记 failed，admin 可在 Dashboard 手动重试
+- **OS 级交互坐标**：cursor_x/y 由 Win32 `GetCursorPos()` 捕获，focus_rect 由 `GetFocus()+GetWindowRect()` 捕获，像素精确，早于 qwen 分析 → Dashboard 画红/黄框时直接用这些坐标，不依赖 AI 推测
+- **首次运行向导**：`init_wizard.py` 检测 `employee_id` 缺失则交互式 prompt（API key 已从客户端移除）
+- **角色权限**：admin（全量）/ manager（部门）/ employee（仅自己），服务端强制过滤
 
 ## 技术栈
 
@@ -62,13 +88,15 @@ SQLite (frames.db)
 ```
 src/workflow_recorder/
 ├── __main__.py          # CLI 入口，banner + 首次运行向导调度
-├── daemon.py            # 单模型主循环，截图 + 分析 + 推送三线程编排
+├── daemon.py            # 单线程 capture loop（截图 + 入队），无本地分析
 ├── config.py            # Pydantic 配置，支持 ${ENV_VAR} / TOML / JSON 预设 / ServerConfig
-├── init_wizard.py       # 首次运行交互向导（employee_id + DashScope API key）
-├── frame_pusher.py      # 后台推送线程 + 失败帧 JSONL 缓冲 + 启动重推
+├── init_wizard.py       # 首次运行交互向导（employee_id；API key 已迁到服务端）
+├── image_uploader.py    # 多部分上传线程 + 失败帧 JSONL 缓冲 + 启动重推
 ├── capture/
-│   ├── screenshot.py    # mss 截屏
+│   ├── screenshot.py    # mss 截屏（附带 cursor_x/y + focus_rect）
+│   ├── cursor_focus.py  # Win32 GetCursorPos/GetFocus + 坐标变换
 │   ├── window_info.py   # 活动窗口检测 (Win32/macOS)
+│   ├── idle_detector.py # Win32 GetLastInputInfo + 指数退避
 │   └── privacy.py       # 隐私过滤
 ├── analysis/
 │   ├── vision_client.py # OpenAI 兼容 vision API（支持 base_url 代理）
@@ -88,14 +116,18 @@ src/workflow_recorder/
     └── storage.py       # 临时文件管理
 server/
 ├── __init__.py
-├── app.py               # FastAPI 应用，挂载所有 router + 静态文件
-├── db.py                # sqlite3 schema（frames/users/sops/sop_steps）+ 全部 CRUD
+├── app.py               # FastAPI 应用，挂载所有 router + 启动/关闭 AnalysisPool + 静态文件
+├── db.py                # sqlite3 schema（frames/users/sops/sop_steps）+ 全部 CRUD + offline 队列 helper
+├── image_storage.py     # 图片落盘：./frame_images/<emp>/<date>/<session>/<idx>.png + 路径净化
+├── frames_router.py     # /frames/upload + /api/frames/:id/image|retry + /api/frames/queue
+├── api_keys.py          # ./api_keys.txt 解析（一行一 key，# 注释，空行跳过）
+├── analysis_pool.py     # AnalysisWorker + AnalysisPool（每 key 一 daemon 线程，原子 claim）
 ├── auth.py              # JWT 创建/验证 + bcrypt 密码哈希
 ├── auth_router.py       # /api/auth/* — login, refresh, me + get_current_user 依赖
 ├── models.py            # Pydantic schemas（auth/user/sop/step request/response）
 ├── permissions.py       # 角色权限过滤（admin 全量 / manager 部门 / employee 仅自己）
 ├── users_router.py      # /api/users/* — 用户 CRUD（admin only）
-├── sessions_router.py   # /api/sessions/* — 录制 session 列表/详情
+├── sessions_router.py   # /api/sessions/* — 录制 session 列表/详情（带 image_path）
 ├── sops_router.py       # /api/sops/* — SOP CRUD + 状态流转 + 自动提炼 + 导出
 └── stats_router.py      # /api/dashboard/*, /api/frames/stats,search,export
 dashboard/
@@ -109,7 +141,8 @@ dashboard/
 │   ├── api/
 │   │   ├── client.ts    # Axios 实例 + JWT 拦截器
 │   │   ├── auth.ts      # 登录/刷新/me API
-│   │   ├── sessions.ts  # session 列表/详情 API
+│   │   ├── sessions.ts  # session 列表/详情 API（FrameInfo 带 image_path / cursor / focus）
+│   │   ├── frames.ts    # 原图 URL / 失败重试 / 分析队列状态
 │   │   ├── sops.ts      # SOP CRUD + 步骤 + 导出 API
 │   │   ├── stats.ts     # 统计/搜索/导出 API
 │   │   └── users.ts     # 用户管理 API
@@ -123,9 +156,11 @@ dashboard/
 │   │   ├── Audit.vue         # 审计查询：关键词搜索 + CSV 导出
 │   │   ├── UserManagement.vue # 用户管理：用户表 + 角色编辑
 │   │   └── Settings.vue      # 系统设置：服务器健康信息
-│   └── components/layout/
-│       ├── Sidebar.vue       # 左侧导航（按角色动态菜单）
-│       └── Header.vue        # 顶栏（用户名 + 角色标签 + 退出）
+│   └── components/
+│       ├── FrameImage.vue    # <img> blob-URL fetch + red/yellow overlay（cursor/focus）
+│       └── layout/
+│           ├── Sidebar.vue   # 左侧导航（按角色动态菜单）
+│           └── Header.vue    # 顶栏（用户名 + 角色标签 + 退出）
 └── dist/                     # 构建输出，FastAPI serve 此目录
 installer/
 ├── build.py                  # 构建自动化脚本
@@ -274,6 +309,7 @@ model    = qwen3.5-plus
 
 ### 历史备忘
 
+- 2026-04-14 **v0.4.0 架构重构**：从"客户端在线分析"切到"客户端仅上传图片 + 服务端 worker pool 并行分析"。客户端删除 `frame_pusher.py` + 本地 qwen 调用，只保留 capture+upload；`vision_client.py` 从客户端数据路径拆出，成为服务端的库。新增 `server/analysis_pool.py`, `server/api_keys.py`, `server/image_storage.py`, `server/frames_router.py`, `src/workflow_recorder/image_uploader.py`, `src/workflow_recorder/capture/cursor_focus.py`。硬切 `POST /frames` + `POST /frames/batch` 老接口，换成 `POST /frames/upload` multipart。DB 加了 `image_path/analysis_status/cursor_x,y/focus_rect_json` 5 列（幂等 ALTER TABLE）。Dashboard 加 `<FrameImage>` 组件（红框=cursor，黄框=focus），`Recording.vue` 左图右文，`Settings.vue` 新增 admin 队列 widget。
 - 2026-04-11 烟测确认 aicodemirror 代理已不再路由 `gpt-4o`（返回 `SETTLEMENT_UNKNOWN_MODEL` HTTP 400），所以主流程完全迁移到 DashScope + qwen3.5-plus。
 - 旧版双模型并行录制代码（`dual_daemon.py` / `output/comparison.py` / `--dual` / `--recover` / `load_dual_model_configs`）在单模型化完成后已整体删除；如需回看，检出 commit `86219a6` 之前的历史即可。
 
