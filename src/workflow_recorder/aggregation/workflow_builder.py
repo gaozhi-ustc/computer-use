@@ -25,7 +25,6 @@ from workflow_recorder.output.schema import (
 
 if TYPE_CHECKING:
     from workflow_recorder.analysis.frame_analysis import FrameAnalysis
-    from workflow_recorder.daemon import CapturedFrame
 
 log = structlog.get_logger()
 
@@ -41,7 +40,7 @@ class WorkflowBuilder:
         session_id: str,
         start_time: float,
         frame_analyses: list[FrameAnalysis],
-        captured_frames: list[CapturedFrame],
+        captured_frames: list,  # list[CapturedFrame] — old shape, duck-typed
     ) -> Workflow:
         duration = time.time() - start_time
 
