@@ -58,13 +58,11 @@ def _print_banner(config) -> None:
 
     print()
     print("=" * 58)
-    print("  Workflow Recorder v0.1.0")
+    print("  Workflow Recorder v0.4.0")
     print("=" * 58)
     print()
-    base = config.analysis.base_url or "https://api.openai.com/v1"
-    has_key = "***" + config.analysis.openai_api_key[-4:] if len(config.analysis.openai_api_key) > 4 else "(not set)"
-    server_status = config.server.url if config.server.enabled else "disabled"
 
+    server_target = config.server.url if config.server.enabled else "disabled"
     if config.idle_detection.enabled:
         idle_str = (f"idle backoff: >{int(config.idle_detection.idle_threshold_seconds)}s "
                     f"-> up to {int(config.idle_detection.max_interval_seconds)}s")
@@ -74,13 +72,10 @@ def _print_banner(config) -> None:
     print(f"  Employee ID:          {config.employee_id or '(not set)'}")
     print(f"  Screenshot interval:  {config.capture.interval_seconds}s ({idle_str})")
     print(f"  Max recording time:   {duration_str}")
-    print(f"  Model:                {config.analysis.model}")
-    print(f"  API endpoint:         {base}")
-    print(f"  API key:              {has_key}")
-    print(f"  Push target:          {server_status}")
+    print(f"  Upload target:        {server_target}")
     print(f"  Output directory:     {output_dir}")
     print()
-    print("  Recording is now in progress.")
+    print("  Analysis now runs on the server — no API key needed on this machine.")
     print("  Press Ctrl+C to stop early.")
     print()
     print("-" * 58)
@@ -91,12 +86,12 @@ def _print_progress(daemon) -> None:
     if not daemon.session:
         return
     elapsed = int(daemon.session.elapsed)
-    captured = len(daemon.session.captured_frames)
-    analyzed = len(daemon.session.frame_analyses)
+    captured = daemon.session.frames_captured
+    skipped = daemon.session.frames_skipped
     mins, secs = divmod(elapsed, 60)
     sys.stdout.write(
         f"\r  [{mins:02d}:{secs:02d}] "
-        f"Frames captured: {captured}  |  Analyzed: {analyzed}"
+        f"Frames captured: {captured}  |  Skipped: {skipped}"
     )
     sys.stdout.flush()
 
@@ -112,35 +107,22 @@ def _print_summary(daemon) -> None:
         return
 
     elapsed = int(daemon.session.elapsed)
-    captured = len(daemon.session.captured_frames)
-    analyzed = len(daemon.session.frame_analyses)
+    captured = daemon.session.frames_captured
+    skipped = daemon.session.frames_skipped
     mins, secs = divmod(elapsed, 60)
 
     print(f"  Recording complete!")
     print()
     print(f"  Duration:         {mins}m {secs}s")
     print(f"  Frames captured:  {captured}")
-    print(f"  Frames analyzed:  {analyzed}")
-    if daemon.pusher is not None and daemon.config.server.enabled:
-        print(f"  Pushed to server: {daemon.pusher.pushed_ok}"
-              f"  (buffered on failure: {daemon.pusher.buffered})")
-
-    output_dir = Path(daemon.config.output.directory).resolve()
-    if output_dir.exists():
-        json_files = list(output_dir.glob("workflow_*.json"))
-        md_files = list(output_dir.glob("workflow_*.md"))
-        if json_files:
-            print()
-            print(f"  Workflow JSON:     {json_files[-1]}")
-        if md_files:
-            print(f"  Workflow Summary:  {md_files[-1]}")
+    print(f"  Frames skipped:   {skipped}")
+    if daemon.config.server.enabled:
+        print(f"  Upload target:    {daemon.config.server.url}")
     else:
-        if analyzed == 0:
-            print()
-            print("  No analyses completed. Check your API key in config.yaml.")
+        print(f"  Upload target:    disabled")
 
     print()
-    print(f"  All outputs saved to: {output_dir}")
+    print("  Analysis runs on the server — check the dashboard for results.")
     print()
     print("=" * 58)
 
@@ -148,7 +130,7 @@ def _print_summary(daemon) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="workflow-recorder",
-        description="Record and analyze Windows desktop workflows via GPT vision",
+        description="Record Windows desktop captures and upload for server-side analysis",
     )
     parser.add_argument(
         "-c", "--config",
@@ -158,7 +140,7 @@ def main() -> None:
     parser.add_argument(
         "--capture-only",
         action="store_true",
-        help="Only capture screenshots without GPT analysis",
+        help="Only capture screenshots without uploading",
     )
     args = parser.parse_args()
 
