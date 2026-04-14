@@ -265,3 +265,29 @@ def test_delete_user(fresh_db):
     uid = insert_user(username="del", password_hash="x", display_name="Del", role="employee")
     delete_user(uid)
     assert get_user_by_id(uid) is None
+
+
+# ---------------------------------------------------------------------------
+# Offline analysis — migration (Task 1)
+# ---------------------------------------------------------------------------
+
+
+def test_migration_adds_offline_columns(fresh_db):
+    """DB must have image_path, analysis_status, cursor_x/y, focus_rect_json columns."""
+    import server.db as db_mod
+    with db_mod.connect() as conn:
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(frames)").fetchall()}
+    for expected in ("image_path", "analysis_status", "analysis_error",
+                     "analysis_attempts", "analyzed_at",
+                     "cursor_x", "cursor_y", "focus_rect_json"):
+        assert expected in cols, f"Column {expected} not added by migration"
+
+
+def test_migration_adds_status_index(fresh_db):
+    """An index on (analysis_status, id) must exist for worker queue queries."""
+    import server.db as db_mod
+    with db_mod.connect() as conn:
+        idx_names = {row["name"] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        ).fetchall()}
+    assert "idx_frames_status" in idx_names

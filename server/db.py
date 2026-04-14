@@ -132,6 +132,31 @@ def _migrate_add_columns(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE frames ADD COLUMN context_data_json TEXT DEFAULT '{}'"
         )
+    # v0.4.0: offline analysis fields
+    if "image_path" not in cols:
+        conn.execute("ALTER TABLE frames ADD COLUMN image_path TEXT DEFAULT ''")
+    if "analysis_status" not in cols:
+        conn.execute(
+            "ALTER TABLE frames ADD COLUMN analysis_status TEXT DEFAULT 'done'"
+        )
+    if "analysis_error" not in cols:
+        conn.execute("ALTER TABLE frames ADD COLUMN analysis_error TEXT DEFAULT ''")
+    if "analysis_attempts" not in cols:
+        conn.execute(
+            "ALTER TABLE frames ADD COLUMN analysis_attempts INTEGER DEFAULT 0"
+        )
+    if "analyzed_at" not in cols:
+        conn.execute("ALTER TABLE frames ADD COLUMN analyzed_at TEXT DEFAULT ''")
+    if "cursor_x" not in cols:
+        conn.execute("ALTER TABLE frames ADD COLUMN cursor_x INTEGER DEFAULT -1")
+    if "cursor_y" not in cols:
+        conn.execute("ALTER TABLE frames ADD COLUMN cursor_y INTEGER DEFAULT -1")
+    if "focus_rect_json" not in cols:
+        conn.execute("ALTER TABLE frames ADD COLUMN focus_rect_json TEXT DEFAULT ''")
+    # Index for AnalysisPool worker queue lookup
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_frames_status ON frames(analysis_status, id)"
+    )
 
 
 def insert_frame(frame: dict[str, Any]) -> Optional[int]:
