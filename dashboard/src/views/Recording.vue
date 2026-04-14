@@ -2,14 +2,40 @@
 import { ref, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
-import { sessionsApi, type SessionInfo, type SessionDetail, type FrameInfo } from '@/api/sessions'
+import { sessionsApi, type SessionInfo, type SessionDetail, type FrameInfo, type AnalysisStatus } from '@/api/sessions'
 import { sopsApi } from '@/api/sops'
+import FrameImage from '@/components/FrameImage.vue'
 import {
   NCard, NSpace, NInput, NDatePicker, NTag, NBadge, NEmpty,
   NSpin, NTimeline, NTimelineItem, NProgress, NGrid, NGi,
   NScrollbar, NDescriptions, NDescriptionsItem, NCollapse, NCollapseItem,
-  NButton, useMessage
+  NButton, NModal, useMessage
 } from 'naive-ui'
+
+const modalFrame = ref<FrameInfo | null>(null)
+function openFrameModal(frame: FrameInfo) {
+  modalFrame.value = frame
+}
+
+function statusBadgeType(s: AnalysisStatus): 'default' | 'info' | 'success' | 'warning' | 'error' {
+  switch (s) {
+    case 'pending': return 'default'
+    case 'running': return 'info'
+    case 'done': return 'success'
+    case 'failed': return 'error'
+    default: return 'default'
+  }
+}
+
+function statusLabel(s: AnalysisStatus): string {
+  switch (s) {
+    case 'pending': return '等待分析'
+    case 'running': return '分析中'
+    case 'done': return '已分析'
+    case 'failed': return '分析失败'
+    default: return ''
+  }
+}
 
 const router = useRouter()
 const message = useMessage()
@@ -250,94 +276,116 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
                   <NTimelineItem
                     v-for="frame in selectedSession.frames"
                     :key="frame.id"
-                    :title="frame.application || '未知应用'"
                     :time="formatDate(frame.recorded_at)"
                   >
-                    <NSpace vertical :size="8">
-                      <span v-if="frame.user_action" class="frame-action">
-                        {{ frame.user_action }}
-                      </span>
+                    <template #header>
                       <NSpace align="center" :size="8">
-                        <span class="confidence-label">置信度</span>
-                        <NProgress
-                          type="line"
-                          :percentage="Math.round(frame.confidence * 100)"
-                          :status="getConfidenceType(frame.confidence)"
-                          :show-indicator="true"
-                          style="width: 160px"
-                        />
+                        <span>{{ frame.application || '未知应用' }}</span>
+                        <NTag
+                          v-if="frame.analysis_status && frame.analysis_status !== 'done'"
+                          size="small"
+                          :type="statusBadgeType(frame.analysis_status)"
+                        >
+                          {{ statusLabel(frame.analysis_status) }}
+                        </NTag>
                       </NSpace>
-                      <NCollapse>
-                        <NCollapseItem title="详细信息" name="detail">
-                          <NDescriptions
-                            label-placement="left"
-                            :column="1"
-                            size="small"
-                          >
-                            <NDescriptionsItem label="窗口标题">
-                              {{ frame.window_title || '-' }}
-                            </NDescriptionsItem>
-                            <NDescriptionsItem label="文本内容">
-                              {{ frame.text_content || '-' }}
-                            </NDescriptionsItem>
-                            <NDescriptionsItem label="鼠标位置">
-                              {{ frame.mouse_position?.join(', ') || '-' }}
-                            </NDescriptionsItem>
-                            <NDescriptionsItem label="UI元素">
-                              <NSpace v-if="frame.ui_elements && frame.ui_elements.length > 0" vertical :size="4">
-                                <NTag
-                                  v-for="(el, idx) in frame.ui_elements"
-                                  :key="idx"
-                                  size="small"
-                                >
-                                  {{ el.name }} ({{ el.element_type }}) [{{ el.coordinates.join(', ') }}]
-                                </NTag>
-                              </NSpace>
-                              <span v-else>-</span>
-                            </NDescriptionsItem>
-                            <template v-if="hasContextData(frame)">
-                              <NDescriptionsItem
-                                v-if="frame.context_data.excel_headers"
-                                label="Excel 表头"
+                    </template>
+                    <div class="frame-row">
+                      <div class="frame-left">
+                        <FrameImage
+                          :frame="frame"
+                          max-width="280px"
+                          @click="openFrameModal(frame)"
+                        />
+                      </div>
+                      <div class="frame-right">
+                        <NSpace vertical :size="8">
+                          <span v-if="frame.user_action" class="frame-action">
+                            {{ frame.user_action }}
+                          </span>
+                          <NSpace align="center" :size="8">
+                            <span class="confidence-label">置信度</span>
+                            <NProgress
+                              type="line"
+                              :percentage="Math.round(frame.confidence * 100)"
+                              :status="getConfidenceType(frame.confidence)"
+                              :show-indicator="true"
+                              style="width: 160px"
+                            />
+                          </NSpace>
+                          <NCollapse>
+                            <NCollapseItem title="详细信息" name="detail">
+                              <NDescriptions
+                                label-placement="left"
+                                :column="1"
+                                size="small"
                               >
-                                <NSpace :size="4" wrap>
-                                  <NTag
-                                    v-for="(h, idx) in (frame.context_data.excel_headers as string[])"
-                                    :key="idx"
-                                    size="small"
-                                    type="info"
+                                <NDescriptionsItem label="窗口标题">
+                                  {{ frame.window_title || '-' }}
+                                </NDescriptionsItem>
+                                <NDescriptionsItem label="文本内容">
+                                  {{ frame.text_content || '-' }}
+                                </NDescriptionsItem>
+                                <NDescriptionsItem label="鼠标位置">
+                                  {{ frame.mouse_position?.join(', ') || '-' }}
+                                </NDescriptionsItem>
+                                <NDescriptionsItem label="UI元素">
+                                  <NSpace v-if="frame.ui_elements && frame.ui_elements.length > 0" vertical :size="4">
+                                    <NTag
+                                      v-for="(el, idx) in frame.ui_elements"
+                                      :key="idx"
+                                      size="small"
+                                    >
+                                      {{ el.name }} ({{ el.element_type }}) [{{ el.coordinates.join(', ') }}]
+                                    </NTag>
+                                  </NSpace>
+                                  <span v-else>-</span>
+                                </NDescriptionsItem>
+                                <template v-if="hasContextData(frame)">
+                                  <NDescriptionsItem
+                                    v-if="frame.context_data.excel_headers"
+                                    label="Excel 表头"
                                   >
-                                    {{ h }}
-                                  </NTag>
-                                </NSpace>
-                                <div
-                                  v-if="frame.context_data.active_cell || frame.context_data.sheet_name"
-                                  style="margin-top: 6px; color: #999; font-size: 12px;"
-                                >
-                                  <span v-if="frame.context_data.sheet_name">Sheet: {{ frame.context_data.sheet_name }}</span>
-                                  <span v-if="frame.context_data.active_cell" style="margin-left: 12px;">单元格: {{ frame.context_data.active_cell }}</span>
-                                </div>
-                              </NDescriptionsItem>
-                              <NDescriptionsItem
-                                v-if="frame.context_data.page_title"
-                                label="页面标题"
-                              >
-                                {{ frame.context_data.page_title }}
-                                <div v-if="frame.context_data.url" style="color: #999; font-size: 12px; margin-top: 2px;">
-                                  {{ frame.context_data.url }}
-                                </div>
-                              </NDescriptionsItem>
-                              <NDescriptionsItem
-                                v-if="frame.context_data.nearby_content"
-                                label="附近内容"
-                              >
-                                {{ frame.context_data.nearby_content }}
-                              </NDescriptionsItem>
-                            </template>
-                          </NDescriptions>
-                        </NCollapseItem>
-                      </NCollapse>
-                    </NSpace>
+                                    <NSpace :size="4" wrap>
+                                      <NTag
+                                        v-for="(h, idx) in (frame.context_data.excel_headers as string[])"
+                                        :key="idx"
+                                        size="small"
+                                        type="info"
+                                      >
+                                        {{ h }}
+                                      </NTag>
+                                    </NSpace>
+                                    <div
+                                      v-if="frame.context_data.active_cell || frame.context_data.sheet_name"
+                                      style="margin-top: 6px; color: #999; font-size: 12px;"
+                                    >
+                                      <span v-if="frame.context_data.sheet_name">Sheet: {{ frame.context_data.sheet_name }}</span>
+                                      <span v-if="frame.context_data.active_cell" style="margin-left: 12px;">单元格: {{ frame.context_data.active_cell }}</span>
+                                    </div>
+                                  </NDescriptionsItem>
+                                  <NDescriptionsItem
+                                    v-if="frame.context_data.page_title"
+                                    label="页面标题"
+                                  >
+                                    {{ frame.context_data.page_title }}
+                                    <div v-if="frame.context_data.url" style="color: #999; font-size: 12px; margin-top: 2px;">
+                                      {{ frame.context_data.url }}
+                                    </div>
+                                  </NDescriptionsItem>
+                                  <NDescriptionsItem
+                                    v-if="frame.context_data.nearby_content"
+                                    label="附近内容"
+                                  >
+                                    {{ frame.context_data.nearby_content }}
+                                  </NDescriptionsItem>
+                                </template>
+                              </NDescriptions>
+                            </NCollapseItem>
+                          </NCollapse>
+                        </NSpace>
+                      </div>
+                    </div>
                   </NTimelineItem>
                 </NTimeline>
               </NScrollbar>
@@ -346,6 +394,27 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
         </NCard>
       </NGi>
     </NGrid>
+
+    <NModal
+      :show="modalFrame !== null"
+      preset="card"
+      style="width: 90vw; max-width: 1600px;"
+      :on-update:show="(v: boolean) => { if (!v) modalFrame = null }"
+    >
+      <template v-if="modalFrame">
+        <div style="display: flex; gap: 16px;">
+          <div style="flex: 0 0 auto;">
+            <FrameImage :frame="modalFrame" max-width="80vw" :clickable="false" />
+          </div>
+          <div style="flex: 1 1 auto; overflow-y: auto; max-height: 85vh;">
+            <h3>{{ modalFrame.user_action || '(无分析)' }}</h3>
+            <p v-if="modalFrame.application">应用: {{ modalFrame.application }}</p>
+            <p v-if="modalFrame.window_title">窗口: {{ modalFrame.window_title }}</p>
+            <p v-if="modalFrame.text_content">文本: {{ modalFrame.text_content }}</p>
+          </div>
+        </div>
+      </template>
+    </NModal>
   </div>
 </template>
 
@@ -383,5 +452,20 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
   font-size: 12px;
   color: #666;
   white-space: nowrap;
+}
+
+.frame-row {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.frame-left {
+  flex: 0 0 auto;
+}
+
+.frame-right {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 </style>

@@ -15,6 +15,8 @@ export interface SessionListResponse {
   sessions: SessionInfo[]
 }
 
+export type AnalysisStatus = 'pending' | 'running' | 'done' | 'failed'
+
 export interface FrameInfo {
   id: number
   employee_id: string
@@ -30,6 +32,13 @@ export interface FrameInfo {
   mouse_position: number[]
   ui_elements: Array<{ name: string; element_type: string; coordinates: number[] }>
   context_data: Record<string, unknown>
+  // v0.4.0 offline-analysis fields
+  image_path?: string
+  analysis_status?: AnalysisStatus
+  analysis_error?: string
+  cursor_x?: number  // -1 if OS capture unavailable
+  cursor_y?: number
+  focus_rect?: number[] | null  // [x1, y1, x2, y2] in image pixels
 }
 
 export interface SessionDetail {
