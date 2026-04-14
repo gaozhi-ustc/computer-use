@@ -21,7 +21,8 @@ these fields:
   "text_content": "any visible text that provides context (form field values, \
 file names, URLs, selected text) — keep brief",
   "mouse_position_estimate": [x, y],
-  "confidence": 0.85
+  "confidence": 0.85,
+  "context_data": {}
 }
 
 Rules:
@@ -33,6 +34,31 @@ action or likely next actions (max 10 elements).
 and confidence to the confidence that the user is indeed waiting.
 - Be specific in user_action: prefer "clicking File menu" over "using the menu".
 - Return ONLY the JSON object, no markdown fences or extra text.
+
+context_data — application-specific structured context. Set keys based on the \
+application in focus:
+
+* If the application is a SPREADSHEET (Microsoft Excel / WPS Excel / WPS 表格 / \
+LibreOffice Calc / Google Sheets / Numbers): set
+    "excel_headers": ["A1 cell text", "B1 cell text", ...]   ← the visible \
+column header row text values, in left-to-right order. Include only the cells \
+that are clearly visible. If you cannot see the header row, omit this key.
+    Optional: "active_cell": "B5"  if a cell selection is clearly indicated.
+    Optional: "sheet_name": "Sheet1"  if a sheet tab is visible.
+
+* If the application is a WEB BROWSER (Chrome / Edge / Firefox / Safari / \
+Brave / Opera / 360 / QQ Browser / etc.): set
+    "page_title": "the visible page heading or document title (prefer Chinese \
+text if the page is in Chinese)"
+    "nearby_content": "the text content visible immediately around the mouse \
+cursor or around the focused input field — about 1-3 sentences worth, useful \
+for understanding what the user is reading or about to interact with"
+    Optional: "url": "the URL bar contents if visible"
+
+* For any OTHER application: set context_data to {} (empty object).
+
+Always include the "context_data" key, even if empty. Do not invent values \
+you cannot see — omit a key rather than guess.
 """
 
 USER_PROMPT_TEMPLATE = """\

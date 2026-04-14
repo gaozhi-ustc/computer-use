@@ -169,6 +169,10 @@ class VisionClient:
                     coordinates=elem.get("coordinates", []),
                 ))
 
+        context_data = data.get("context_data", {})
+        if not isinstance(context_data, dict):
+            context_data = {}
+
         return FrameAnalysis(
             frame_index=frame_index,
             timestamp=timestamp or time.time(),
@@ -179,4 +183,5 @@ class VisionClient:
             text_content=data.get("text_content", ""),
             mouse_position_estimate=data.get("mouse_position_estimate", []),
             confidence=float(data.get("confidence", 0.0)),
+            context_data=context_data,
         )

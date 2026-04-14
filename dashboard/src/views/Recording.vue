@@ -2,7 +2,7 @@
 import { ref, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
-import { sessionsApi, type SessionInfo, type SessionDetail } from '@/api/sessions'
+import { sessionsApi, type SessionInfo, type SessionDetail, type FrameInfo } from '@/api/sessions'
 import { sopsApi } from '@/api/sops'
 import {
   NCard, NSpace, NInput, NDatePicker, NTag, NBadge, NEmpty,
@@ -110,6 +110,12 @@ function getConfidenceType(confidence: number): 'success' | 'warning' | 'error' 
   if (confidence >= 0.8) return 'success'
   if (confidence >= 0.5) return 'warning'
   return 'error'
+}
+
+function hasContextData(frame: FrameInfo): boolean {
+  const ctx = frame.context_data
+  if (!ctx || typeof ctx !== 'object') return false
+  return !!(ctx.excel_headers || ctx.page_title || ctx.nearby_content)
 }
 
 onMounted(fetchSessions)
@@ -289,6 +295,45 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
                               </NSpace>
                               <span v-else>-</span>
                             </NDescriptionsItem>
+                            <template v-if="hasContextData(frame)">
+                              <NDescriptionsItem
+                                v-if="frame.context_data.excel_headers"
+                                label="Excel 表头"
+                              >
+                                <NSpace :size="4" wrap>
+                                  <NTag
+                                    v-for="(h, idx) in (frame.context_data.excel_headers as string[])"
+                                    :key="idx"
+                                    size="small"
+                                    type="info"
+                                  >
+                                    {{ h }}
+                                  </NTag>
+                                </NSpace>
+                                <div
+                                  v-if="frame.context_data.active_cell || frame.context_data.sheet_name"
+                                  style="margin-top: 6px; color: #999; font-size: 12px;"
+                                >
+                                  <span v-if="frame.context_data.sheet_name">Sheet: {{ frame.context_data.sheet_name }}</span>
+                                  <span v-if="frame.context_data.active_cell" style="margin-left: 12px;">单元格: {{ frame.context_data.active_cell }}</span>
+                                </div>
+                              </NDescriptionsItem>
+                              <NDescriptionsItem
+                                v-if="frame.context_data.page_title"
+                                label="页面标题"
+                              >
+                                {{ frame.context_data.page_title }}
+                                <div v-if="frame.context_data.url" style="color: #999; font-size: 12px; margin-top: 2px;">
+                                  {{ frame.context_data.url }}
+                                </div>
+                              </NDescriptionsItem>
+                              <NDescriptionsItem
+                                v-if="frame.context_data.nearby_content"
+                                label="附近内容"
+                              >
+                                {{ frame.context_data.nearby_content }}
+                              </NDescriptionsItem>
+                            </template>
                           </NDescriptions>
                         </NCollapseItem>
                       </NCollapse>

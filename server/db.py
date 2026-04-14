@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS frames (
     confidence REAL,
     mouse_position_json TEXT,
     ui_elements_json TEXT,
+    context_data_json TEXT DEFAULT '{}',
     UNIQUE(employee_id, session_id, frame_index) ON CONFLICT IGNORE
 );
 
@@ -121,6 +122,16 @@ def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
         conn.executescript(USERS_SCHEMA)
+        _migrate_add_columns(conn)
+
+
+def _migrate_add_columns(conn: sqlite3.Connection) -> None:
+    """Idempotent ALTER TABLE for new columns added in later versions."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(frames)").fetchall()}
+    if "context_data_json" not in cols:
+        conn.execute(
+            "ALTER TABLE frames ADD COLUMN context_data_json TEXT DEFAULT '{}'"
+        )
 
 
 def insert_frame(frame: dict[str, Any]) -> Optional[int]:
@@ -146,6 +157,7 @@ def insert_frame(frame: dict[str, Any]) -> Optional[int]:
         float(frame.get("confidence") or 0.0),
         json.dumps(frame.get("mouse_position_estimate") or [], ensure_ascii=False),
         json.dumps(frame.get("ui_elements_visible") or [], ensure_ascii=False),
+        json.dumps(frame.get("context_data") or {}, ensure_ascii=False),
     )
 
     with connect() as conn:
@@ -155,8 +167,8 @@ def insert_frame(frame: dict[str, Any]) -> Optional[int]:
                 employee_id, session_id, frame_index,
                 recorded_at, received_at,
                 application, window_title, user_action, text_content,
-                confidence, mouse_position_json, ui_elements_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                confidence, mouse_position_json, ui_elements_json, context_data_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             row,
         )
@@ -267,7 +279,7 @@ def query_frames(
     sql = (
         "SELECT id, employee_id, session_id, frame_index, recorded_at, "
         "received_at, application, window_title, user_action, text_content, "
-        "confidence, mouse_position_json, ui_elements_json "
+        "confidence, mouse_position_json, ui_elements_json, context_data_json "
         f"FROM frames {where} "
         "ORDER BY recorded_at DESC, frame_index DESC "
         "LIMIT ? OFFSET ?"
@@ -786,11 +798,18 @@ def _ts_to_iso(ts: Any) -> str:
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     d = dict(row)
-    for key in ("mouse_position_json", "ui_elements_json"):
+    list_keys = ("mouse_position_json", "ui_elements_json")
+    for key in list_keys:
         raw = d.pop(key, None)
         out_key = key.replace("_json", "")
         try:
             d[out_key] = json.loads(raw) if raw else []
         except json.JSONDecodeError:
             d[out_key] = []
+    # context_data is a dict (not list) — separate handling
+    raw_ctx = d.pop("context_data_json", None)
+    try:
+        d["context_data"] = json.loads(raw_ctx) if raw_ctx else {}
+    except json.JSONDecodeError:
+        d["context_data"] = {}
     return d

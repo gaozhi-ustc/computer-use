@@ -55,6 +55,7 @@ class FrameIn(BaseModel):
     confidence: float = 0.0
     mouse_position_estimate: list[int] = Field(default_factory=list)
     ui_elements_visible: list[UIElementIn] = Field(default_factory=list)
+    context_data: dict = Field(default_factory=dict)
 
 
 class IngestResult(BaseModel):
@@ -84,6 +85,7 @@ class FrameOut(BaseModel):
     confidence: float = 0.0
     mouse_position: list = Field(default_factory=list)
     ui_elements: list = Field(default_factory=list)
+    context_data: dict = Field(default_factory=dict)
 
 
 class FrameListResult(BaseModel):

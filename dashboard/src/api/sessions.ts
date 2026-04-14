@@ -29,6 +29,7 @@ export interface FrameInfo {
   confidence: number
   mouse_position: number[]
   ui_elements: Array<{ name: string; element_type: string; coordinates: number[] }>
+  context_data: Record<string, unknown>
 }
 
 export interface SessionDetail {

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -23,3 +25,5 @@ class FrameAnalysis(BaseModel):
     text_content: str = ""
     mouse_position_estimate: list[int] = Field(default_factory=list)  # [x, y]
     confidence: float = 0.0
+    context_data: dict[str, Any] = Field(default_factory=dict)
+    """Application-specific structured context (Excel headers, browser title, etc.)."""
