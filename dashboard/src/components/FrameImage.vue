@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onUnmounted } from 'vue'
 import type { FrameInfo } from '@/api/sessions'
+import client from '@/api/client'
 
 const props = withDefaults(defineProps<{
   frame: FrameInfo
@@ -20,6 +21,32 @@ const naturalW = ref(0)
 const naturalH = ref(0)
 const loaded = ref(false)
 const errored = ref(false)
+const blobUrl = ref<string>('')
+
+async function fetchImage() {
+  if (blobUrl.value) {
+    URL.revokeObjectURL(blobUrl.value)
+    blobUrl.value = ''
+  }
+  loaded.value = false
+  try {
+    const resp = await client.get(`/api/frames/${props.frame.id}/image`, {
+      responseType: 'blob',
+    })
+    blobUrl.value = URL.createObjectURL(resp.data)
+    errored.value = false
+  } catch {
+    errored.value = true
+  }
+}
+
+watch(() => props.frame.id, fetchImage, { immediate: true })
+
+onUnmounted(() => {
+  if (blobUrl.value) {
+    URL.revokeObjectURL(blobUrl.value)
+  }
+})
 
 function onLoad() {
   if (imgRef.value) {
@@ -92,8 +119,9 @@ const focusOverlay = computed(() => {
     @click="onClick"
   >
     <img
+      v-if="blobUrl"
       ref="imgRef"
-      :src="`/api/frames/${frame.id}/image`"
+      :src="blobUrl"
       class="frame-img"
       alt="recording frame"
       @load="onLoad"
