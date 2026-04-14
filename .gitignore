@@ -35,3 +35,9 @@ venv/
 # Claude Code local state
 .claude/
 .superpowers/
+
+# Offline analysis (v0.4.0)
+frame_images/
+api_keys.txt
+smoke_frames.db
+dashboard_dev.db
