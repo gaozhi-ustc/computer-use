@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("WORKFLOW_SERVER_DB", str(tmp_path / "test.db"))
     monkeypatch.setenv("DASHBOARD_SECRET_KEY", "test-secret")
+    monkeypatch.setenv("WORKFLOW_DISABLE_ANALYSIS_POOL", "1")
     from server.app import app
     from server import db
     db.init_db()

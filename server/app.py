@@ -100,6 +100,11 @@ app.include_router(stats_router)
 app.include_router(users_router)
 
 
+# AnalysisPool is assigned during startup, so tests that don't want workers
+# can monkeypatch WORKFLOW_DISABLE_ANALYSIS_POOL to any non-empty value.
+_analysis_pool = None
+
+
 @app.on_event("startup")
 def _startup() -> None:
     db.init_db()
@@ -112,6 +117,24 @@ def _startup() -> None:
             display_name="System Admin",
             role="admin",
         )
+
+    # Load API keys and start the analysis worker pool.
+    if os.environ.get("WORKFLOW_DISABLE_ANALYSIS_POOL"):
+        return
+    global _analysis_pool
+    from server.analysis_pool import AnalysisPool
+    from server.api_keys import load_api_keys
+    keys = load_api_keys()
+    _analysis_pool = AnalysisPool(keys=keys)
+    _analysis_pool.start()
+
+
+@app.on_event("shutdown")
+def _shutdown() -> None:
+    global _analysis_pool
+    if _analysis_pool is not None:
+        _analysis_pool.stop(timeout=30.0)
+        _analysis_pool = None
 
 
 @app.get("/health")
