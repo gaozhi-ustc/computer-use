@@ -101,3 +101,50 @@ class AnalysisWorker:
             db.reset_frame_to_pending(frame_id)
             log.info("frame_retry_scheduled", frame_id=frame_id,
                      worker=self.label, attempts=attempts, reason=reason)
+
+
+class AnalysisPool:
+    """Manages the set of AnalysisWorker threads, one per API key."""
+
+    def __init__(
+        self,
+        keys: list[str],
+        worker_factory=None,  # for tests to inject FakeVisionClient
+    ):
+        self._keys = list(keys)
+        self._worker_factory = worker_factory
+        self._stop_event = threading.Event()
+        self._threads: list[threading.Thread] = []
+
+    def start(self) -> None:
+        """Spawn one daemon thread per key."""
+        if not self._keys:
+            log.warning("analysis_pool_no_keys",
+                        msg="api_keys.txt empty/missing — uploaded frames "
+                            "will sit in 'pending' forever.")
+            return
+
+        for i, key in enumerate(self._keys):
+            if self._worker_factory is not None:
+                worker = self._worker_factory(key, i, self._stop_event)
+            else:
+                worker = AnalysisWorker(key, i, self._stop_event)
+            t = threading.Thread(
+                target=worker.run,
+                name=f"analysis-worker-{i}",
+                daemon=True,
+            )
+            t.start()
+            self._threads.append(t)
+
+        log.info("analysis_pool_started", worker_count=len(self._keys))
+
+    def stop(self, timeout: float = 30.0) -> None:
+        """Signal all workers to exit and wait."""
+        if not self._threads:
+            return
+        self._stop_event.set()
+        per_thread = max(1.0, timeout / len(self._threads))
+        for t in self._threads:
+            t.join(timeout=per_thread)
+        log.info("analysis_pool_stopped", worker_count=len(self._threads))
