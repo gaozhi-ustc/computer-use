@@ -75,3 +75,16 @@ def test_capture_creates_output_dir(mock_mss, tmp_path):
 def test_capture_all_monitors(mock_mss, tmp_path):
     result = capture_screenshot(output_dir=tmp_path, monitor=-1)
     assert result.monitor_index == -1
+
+
+def test_capture_includes_cursor_and_focus_fields(tmp_path):
+    from workflow_recorder.capture.screenshot import capture_screenshot
+    result = capture_screenshot(output_dir=tmp_path, monitor=0,
+                                 image_format="png", downscale_factor=1.0)
+    # On Windows there's always a cursor; on other OS fields may be defaults (-1 / None)
+    assert hasattr(result, "cursor_x")
+    assert hasattr(result, "cursor_y")
+    assert hasattr(result, "focus_rect")
+    assert isinstance(result.cursor_x, int)
+    assert isinstance(result.cursor_y, int)
+    assert result.focus_rect is None or (isinstance(result.focus_rect, list) and len(result.focus_rect) == 4)

@@ -1,23 +1,21 @@
 """End-to-end pipeline test.
 
-Runs the full daemon for a short duration and validates output.
-Requires: config.test.toml with valid API credentials + Windows desktop.
+Runs the full daemon for a short duration and validates capture counts.
+With the offline analysis architecture, the client only captures+uploads;
+the workflow document is built server-side.
+Requires: config.test.toml + Windows desktop.
 Run with: pytest --run-e2e
 """
 
 from __future__ import annotations
 
-import json
-import shutil
 import threading
-import time
 from pathlib import Path
 
 import pytest
 
 from workflow_recorder.config import load_config
 from workflow_recorder.daemon import Daemon
-from workflow_recorder.output.schema import Workflow
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -26,14 +24,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 @pytest.mark.e2e
 class TestFullPipeline:
 
-    def test_daemon_short_run_produces_output(self, tmp_path):
-        """Run daemon for ~10 seconds, then validate the workflow output."""
+    def test_daemon_short_run_captures_frames(self, tmp_path):
+        """Run daemon for ~10 seconds and validate frames were captured."""
         config_path = PROJECT_ROOT / "config.test.toml"
         if not config_path.exists():
             pytest.skip("config.test.toml not found")
 
         config = load_config(config_path)
-        # Override output to tmp dir
+        # Disable server upload — we only test local capture here
+        config.server.enabled = False
         config.output.directory = str(tmp_path / "output")
         config.session.max_duration_seconds = 10.0
         config.capture.interval_seconds = 2.0
@@ -50,27 +49,13 @@ class TestFullPipeline:
             daemon.stop()
             daemon_thread.join(timeout=5.0)
 
-        # Check output
-        output_dir = Path(config.output.directory)
-        if not output_dir.exists():
-            pytest.skip("No output produced (possibly no GPT analyses succeeded)")
-
-        json_files = list(output_dir.glob("workflow_*.json"))
-        if not json_files:
-            # Capture-only mode or no analyses completed
-            pytest.skip("No workflow JSON produced")
-
-        # Validate JSON against schema
-        data = json.loads(json_files[0].read_text(encoding="utf-8"))
-        workflow = Workflow(**data)
-
-        assert workflow.metadata.session_id != ""
-        assert workflow.metadata.duration_seconds > 0
-        assert workflow.metadata.total_frames_captured >= 1
+        assert daemon.session is not None
+        # Expect several frames captured over the 10s window at 2s interval
+        assert daemon.session.frames_captured >= 1
 
     @pytest.mark.e2e
     def test_capture_only_mode(self, tmp_path):
-        """Test daemon in capture-only mode (no GPT API needed)."""
+        """Test daemon with server upload disabled."""
         config_path = PROJECT_ROOT / "config.test.toml"
         if not config_path.exists():
             pytest.skip("config.test.toml not found")
@@ -79,8 +64,8 @@ class TestFullPipeline:
         config.output.directory = str(tmp_path / "output")
         config.session.max_duration_seconds = 6.0
         config.capture.interval_seconds = 2.0
-        # Invalidate API key to force capture-only mode
-        config.analysis.openai_api_key = ""
+        # Force capture-only (no upload) mode
+        config.server.enabled = False
 
         daemon = Daemon(config)
 
@@ -91,7 +76,5 @@ class TestFullPipeline:
             daemon.stop()
             daemon_thread.join(timeout=5.0)
 
-        # In capture-only mode, session should have captured frames
-        # but no workflow output (no analyses)
         assert daemon.session is not None
-        assert len(daemon.session.captured_frames) >= 1
+        assert daemon.session.frames_captured >= 1
