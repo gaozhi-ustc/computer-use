@@ -1,0 +1,14 @@
+# api_keys.txt — one DashScope API key per line.
+#
+# Lines starting with '#' are comments and ignored.
+# Blank lines are ignored.
+# Inline comments are NOT stripped — keep the file opaque.
+#
+# Get keys from: https://bailian.console.aliyun.com/ → API-KEY 管理
+#
+# THIS FILE IS GITIGNORED. Copy to api_keys.txt and fill in real keys.
+# Each key becomes one AnalysisPool worker thread.
+
+# sk-sp-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# sk-sp-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+# sk-sp-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
