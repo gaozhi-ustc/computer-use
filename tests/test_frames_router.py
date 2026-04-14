@@ -216,3 +216,24 @@ def test_queue_stats_employee_denied(client):
     r = client.get("/api/frames/queue",
                    headers={"Authorization": f"Bearer {emp_token}"})
     assert r.status_code == 403
+
+
+def test_old_post_frames_returns_404(client):
+    """Old JSON-push endpoint is deleted; returns 404 or 405 (not 200/422)."""
+    r = client.post(
+        "/frames",
+        headers={"X-API-Key": "test-upload-key"},
+        json={"employee_id": "E001", "session_id": "s", "frame_index": 1,
+              "timestamp": 1.0},
+    )
+    # 404 = path gone entirely; 405 = path exists (GET /frames kept) but POST not registered
+    assert r.status_code in (404, 405), f"Expected 404/405, got {r.status_code}"
+
+
+def test_old_post_frames_batch_returns_404(client):
+    r = client.post(
+        "/frames/batch",
+        headers={"X-API-Key": "test-upload-key"},
+        json=[],
+    )
+    assert r.status_code in (404, 405), f"Expected 404/405, got {r.status_code}"
