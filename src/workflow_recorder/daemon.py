@@ -126,6 +126,18 @@ class Daemon:
                 self.session.frames_skipped += 1
                 return
 
+            # If the user is mid-mouse-drag/motion, wait briefly for an
+            # intentional click or key so we capture a meaningful frame.
+            from workflow_recorder.capture.cursor_focus import (
+                is_mouse_moving, wait_for_click_or_key,
+            )
+            if (self.config.capture.wait_for_click_when_moving
+                    and is_mouse_moving()):
+                wait_for_click_or_key(
+                    max_wait_seconds=self.config.capture.max_wait_for_click_seconds,
+                    stop_event=self._stop_event,
+                )
+
             result = capture_screenshot(
                 output_dir=self._capture_dir,
                 monitor=self.config.capture.monitor,
