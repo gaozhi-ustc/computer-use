@@ -76,7 +76,14 @@ class ImageUploader:
                  employee_id=self.employee_id, session_id=self.session_id)
 
     def stop(self, timeout: float = 15.0) -> None:
-        """Drain the queue and stop. Safe to call without start."""
+        """Drain the queue and stop. Safe to call without start.
+
+        Gives the worker `timeout` seconds to finish its current upload
+        and any queue items. If the worker is stuck (slow/hanging server)
+        and join times out, the main thread flushes remaining queue items
+        to the JSONL buffer so they can be replayed next session — nothing
+        is lost.
+        """
         if self._thread is None:
             return
         try:
@@ -85,6 +92,11 @@ class ImageUploader:
             pass
         self._stop_event.set()
         self._thread.join(timeout=timeout)
+        # Regardless of whether the worker drained cleanly, salvage any
+        # items that never got a chance to be uploaded.
+        flushed = self._flush_queue_to_buffer()
+        if flushed:
+            log.info("image_uploader_stop_flushed_to_buffer", count=flushed)
         self._thread = None
 
     def enqueue(
@@ -124,7 +136,7 @@ class ImageUploader:
         try:
             # Replay any leftover buffer from a prior session
             self._replay_buffer(client)
-            # Serve live queue
+            # Serve live queue. Process items FIFO; exit cleanly on sentinel.
             while True:
                 item = self._queue.get()
                 if item is _STOP_SENTINEL:
@@ -136,6 +148,25 @@ class ImageUploader:
             except Exception:
                 pass
             log.info("image_uploader_stopped")
+
+    def _flush_queue_to_buffer(self) -> int:
+        """Drain any remaining in-memory queue items to the JSONL buffer
+        so they can be replayed on the next session start. Returns the
+        count of items flushed."""
+        count = 0
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is _STOP_SENTINEL:
+                continue
+            try:
+                self._append_to_buffer(item)
+                count += 1
+            except Exception as exc:
+                log.warning("image_uploader_flush_failed", error=str(exc))
+        return count
 
     def _upload_item(self, client, item: dict) -> None:
         image_path = Path(item["image_path"])

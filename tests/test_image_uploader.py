@@ -229,3 +229,60 @@ def test_enqueue_before_start_raises_or_ignored(tmp_path, sample_png):
     up.enqueue(image_path=sample_png, frame_index=1, timestamp=1.0,
                cursor_x=0, cursor_y=0, focus_rect=None)
     up.stop()  # safe even without start
+
+
+# ---------------------------------------------------------------------------
+# v0.4.5: shutdown flush — items still in queue get persisted to buffer
+# ---------------------------------------------------------------------------
+
+
+def test_stop_flushes_queue_remainder_to_buffer(tmp_path, sample_png, monkeypatch):
+    """If stop() is called while queue has un-uploaded items, those items
+    must be written to the JSONL buffer for next-session replay.
+    Without this, a slow server + large backlog + daemon shutdown = data loss."""
+    # FakeClient that hangs on upload so queue can't drain
+    class BlockingClient:
+        def __init__(self, *a, **kw):
+            self.block = threading.Event()
+
+        def post(self, *a, **kw):
+            # Block until the test releases us. Simulates a slow server.
+            self.block.wait(timeout=10.0)
+            return FakeResponse(200)
+
+        def close(self):
+            pass
+
+    blocking_client = BlockingClient()
+    monkeypatch.setattr("workflow_recorder.image_uploader._build_client",
+                        lambda: blocking_client)
+
+    up = _make_uploader(tmp_path, max_retries=1, timeout=10.0)
+    up.start()
+
+    # Enqueue 5 items. Only the first will be in-flight against the
+    # blocking client; items 2-5 wait in the queue.
+    for i in range(1, 6):
+        up.enqueue(image_path=sample_png, frame_index=i, timestamp=float(i),
+                   cursor_x=i, cursor_y=i, focus_rect=None)
+
+    # Give the worker a moment to grab the first item and block on post()
+    time.sleep(0.3)
+
+    # Stop with a short timeout — simulates daemon shutdown while queue
+    # still has items.
+    up.stop(timeout=1.0)
+
+    # The unblocked client is not used anymore; release so it can exit
+    blocking_client.block.set()
+
+    # Buffer file should contain the items that never got to upload
+    buf = Path(tmp_path / "buffer.jsonl")
+    assert buf.exists(), "buffer file must exist after shutdown flush"
+    lines = [ln for ln in buf.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    # At least 2 of the 5 items should have been flushed (the first was
+    # either in-flight or just starting; items 2+ definitely waiting)
+    assert len(lines) >= 2, f"expected >=2 items flushed, got {len(lines)}"
+    flushed_indices = {json.loads(ln)["frame_index"] for ln in lines}
+    # Items enqueued last are most likely to still be in queue
+    assert any(i in flushed_indices for i in (3, 4, 5))
