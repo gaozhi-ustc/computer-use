@@ -34,6 +34,17 @@ class CaptureConfig(BaseModel):
     downscale_factor: float = 1.0
     max_queue_size: int = 50
 
+    drop_idle_duplicate_frames: bool = True
+    """If True, drop a freshly-captured frame when it is perceptually
+    identical to the previous captured frame AND no mouse/keyboard input
+    happened since the previous capture. Saves bandwidth/storage when
+    nothing is actually happening on screen."""
+
+    duplicate_hash_threshold: int = 2
+    """Hamming-distance threshold for the perceptual-hash comparison used
+    by drop_idle_duplicate_frames. 0 = byte-identical only; 2-3 tolerates
+    cursor blinking / anti-alias jitter but not real content changes."""
+
 
 class PrivacyConfig(BaseModel):
     excluded_apps: list[str] = Field(default_factory=list)

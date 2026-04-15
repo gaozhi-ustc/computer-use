@@ -57,6 +57,11 @@ class Daemon:
         # Last capture timestamp (monotonic). 0.0 = never captured yet,
         # so the first capture fires immediately without waiting.
         self._last_capture_time: float = 0.0
+        # Used by the "drop idle duplicate" filter: perceptual hash of the
+        # most recently kept frame, and the IdleDetector for input checks.
+        # _idle_detector is set in run() but tests can inject it directly.
+        self._last_frame_hash = None
+        self._idle_detector = None
 
     def run(self) -> None:
         """Start capture loop. Blocks until stop() or max_duration."""
@@ -82,6 +87,10 @@ class Daemon:
         # Idle backoff
         idle_cfg = self.config.idle_detection
         idle_detector = IdleDetector() if idle_cfg.enabled else None
+        # Always have an IdleDetector available for the drop-duplicate
+        # filter, even if idle_detection backoff is disabled.
+        if self._idle_detector is None:
+            self._idle_detector = idle_detector or IdleDetector()
         idle_backoff = IdleBackoff(
             base_interval=self.config.capture.interval_seconds,
             max_interval=idle_cfg.max_interval_seconds,
@@ -170,6 +179,66 @@ class Daemon:
 
         return False
 
+    def _should_drop_as_idle_duplicate(
+        self, image_path: "Path", prev_capture_time: float
+    ) -> bool:
+        """Return True iff the freshly-captured image at `image_path` is
+        perceptually identical to the previously kept frame AND no
+        mouse/keyboard input event happened between the two captures.
+
+        Side effect: when keeping the frame, updates self._last_frame_hash
+        to the hash of this frame so the next call compares against it.
+        """
+        cap = self.config.capture
+        if not cap.drop_idle_duplicate_frames:
+            return False
+
+        # Compute perceptual hash. Lazy-import so non-feature paths don't
+        # pay the imagehash import cost.
+        try:
+            import imagehash
+            from PIL import Image
+            with Image.open(image_path) as im:
+                new_hash = imagehash.phash(im)
+        except Exception as exc:
+            # Hash failure shouldn't break the capture pipeline.
+            log.warning("idle_dup_hash_failed", error=str(exc))
+            return False
+
+        prev_hash = self._last_frame_hash
+        # Always remember the new hash as the next baseline (whether we
+        # drop or keep — the *image* is what was captured, which becomes
+        # the comparison point either way).
+        self._last_frame_hash = new_hash
+
+        if prev_hash is None:
+            # First frame ever — nothing to compare against.
+            return False
+
+        # Visual comparison: hamming distance between phashes.
+        try:
+            distance = new_hash - prev_hash  # imagehash overrides __sub__
+        except Exception:
+            return False
+        if distance > cap.duplicate_hash_threshold:
+            return False  # real visual change → keep
+
+        # Visual match. Now check whether any input happened since the
+        # previous capture. If yes → keep (user did something even if
+        # the screen didn't react). If no → drop.
+        if self._idle_detector is None:
+            return False  # safety: can't tell, keep
+        idle_secs = self._idle_detector.seconds_since_last_input()
+        elapsed = time.monotonic() - prev_capture_time
+        # idle_secs > elapsed means the most recent input is older than
+        # the previous capture → no input during the gap → safe to drop.
+        # We use strict > (not >=) so that an input at the boundary
+        # counts as "input happened" — false negatives just keep extra
+        # frames, false positives lose data.
+        if idle_secs > elapsed:
+            return True
+        return False
+
     def _capture_and_enqueue(self) -> None:
         """Take one screenshot, run privacy filters, enqueue for upload."""
         try:
@@ -183,6 +252,7 @@ class Daemon:
             if not self._wait_for_good_capture_moment():
                 return
 
+            prev_capture_time = self._last_capture_time
             result = capture_screenshot(
                 output_dir=self._capture_dir,
                 monitor=self.config.capture.monitor,
@@ -192,6 +262,20 @@ class Daemon:
             )
             apply_masks(result.file_path, self.config.privacy)
             self._last_capture_time = time.monotonic()
+
+            # Drop frame if it's perceptually identical to the previous
+            # kept frame AND no input happened since that capture.
+            if self._should_drop_as_idle_duplicate(
+                result.file_path, prev_capture_time
+            ):
+                try:
+                    result.file_path.unlink()
+                except OSError:
+                    pass
+                self.session.frames_skipped += 1
+                log.debug("frame_dropped_idle_duplicate",
+                          frame_index=self.session.frames_captured + 1)
+                return
 
             self.session.frames_captured += 1
             if self.uploader is not None and self.config.server.enabled:
