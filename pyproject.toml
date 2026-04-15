@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "workflow-recorder"
-version = "0.4.3"
+version = "0.4.4"
 description = "Windows daemon that captures screenshots and analyzes employee workflows via GPT vision"
 requires-python = ">=3.9"
 dependencies = [

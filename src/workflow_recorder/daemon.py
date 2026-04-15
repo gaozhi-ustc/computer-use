@@ -54,6 +54,9 @@ class Daemon:
         self.session: Optional[RecordingSession] = None
         self.uploader: Optional[ImageUploader] = None
         self._capture_dir = get_temp_capture_dir()
+        # Last capture timestamp (monotonic). 0.0 = never captured yet,
+        # so the first capture fires immediately without waiting.
+        self._last_capture_time: float = 0.0
 
     def run(self) -> None:
         """Start capture loop. Blocks until stop() or max_duration."""
@@ -118,6 +121,55 @@ class Daemon:
         """Signal the capture loop to stop."""
         self._stop_event.set()
 
+    def _wait_for_good_capture_moment(self) -> bool:
+        """Block until it's a good time to take the next screenshot.
+
+        Decision tree (re-evaluated each loop iteration so state changes
+        during the wait are picked up):
+
+        1. If the cursor is currently moving and wait_for_click_when_moving
+           is enabled → wait for an intentional click/keystroke (bounded by
+           max_wait_for_click_seconds). After the wait returns (either
+           detected or timeout), take the shot.
+        2. Otherwise (mouse stationary) → enforce a minimum gap of
+           interval_seconds since the LAST capture. If we're still inside
+           that gap, sleep the remainder and re-enter the decision tree
+           (the user may have started moving the mouse during the sleep).
+        3. Mouse stationary AND gap elapsed → capture now.
+
+        Returns True when the caller should proceed to capture, False if
+        stop_event was set and the caller should abort.
+        """
+        from workflow_recorder.capture.cursor_focus import (
+            is_mouse_moving, wait_for_click_or_key,
+        )
+
+        cap = self.config.capture
+        min_gap = cap.interval_seconds
+
+        while not self._stop_event.is_set():
+            if cap.wait_for_click_when_moving and is_mouse_moving():
+                # Motion path: wait for an intentional interaction (or timeout).
+                wait_for_click_or_key(
+                    max_wait_seconds=cap.max_wait_for_click_seconds,
+                    stop_event=self._stop_event,
+                )
+                return not self._stop_event.is_set()
+
+            # Stationary path: ensure >= min_gap since the previous capture.
+            now = time.monotonic()
+            elapsed = now - self._last_capture_time
+            if elapsed >= min_gap:
+                return True
+
+            # Sleep out the remainder (interruptible), then re-check.
+            remaining = min_gap - elapsed
+            if self._stop_event.wait(timeout=remaining):
+                return False
+            # loop continues — the mouse may now be moving
+
+        return False
+
     def _capture_and_enqueue(self) -> None:
         """Take one screenshot, run privacy filters, enqueue for upload."""
         try:
@@ -126,17 +178,10 @@ class Daemon:
                 self.session.frames_skipped += 1
                 return
 
-            # If the user is mid-mouse-drag/motion, wait briefly for an
-            # intentional click or key so we capture a meaningful frame.
-            from workflow_recorder.capture.cursor_focus import (
-                is_mouse_moving, wait_for_click_or_key,
-            )
-            if (self.config.capture.wait_for_click_when_moving
-                    and is_mouse_moving()):
-                wait_for_click_or_key(
-                    max_wait_seconds=self.config.capture.max_wait_for_click_seconds,
-                    stop_event=self._stop_event,
-                )
+            # Block until the capture moment is right (motion-aware +
+            # minimum-interval gap).
+            if not self._wait_for_good_capture_moment():
+                return
 
             result = capture_screenshot(
                 output_dir=self._capture_dir,
@@ -146,6 +191,7 @@ class Daemon:
                 downscale_factor=self.config.capture.downscale_factor,
             )
             apply_masks(result.file_path, self.config.privacy)
+            self._last_capture_time = time.monotonic()
 
             self.session.frames_captured += 1
             if self.uploader is not None and self.config.server.enabled:
