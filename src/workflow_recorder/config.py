@@ -18,7 +18,7 @@ class ServiceConfig(BaseModel):
 
 
 class CaptureConfig(BaseModel):
-    interval_seconds: float = 3.0
+    interval_seconds: float = 1.0
     wait_for_click_when_moving: bool = True
     """If True, when the cursor is moving at capture time, wait for the
     user to click or press a key before taking the screenshot. Avoids

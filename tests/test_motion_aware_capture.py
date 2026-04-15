@@ -81,7 +81,7 @@ def test_capture_config_defaults_wait_for_click():
     cfg = CaptureConfig()
     assert cfg.wait_for_click_when_moving is True
     assert cfg.max_wait_for_click_seconds == 3.0
-    assert cfg.interval_seconds == 3.0
+    assert cfg.interval_seconds == 1.0
 
 
 def test_daemon_waits_for_click_when_mouse_moving(tmp_path, monkeypatch):

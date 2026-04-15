@@ -1,5 +1,5 @@
 #define MyAppName "Workflow Recorder"
-#define MyAppVersion "0.4.6"
+#define MyAppVersion "0.4.7"
 #define MyAppPublisher "Workflow Recorder"
 #define MyAppExeName "workflow-recorder.exe"
 #define MyAppURL "https://github.com/gaozhi-ustc/computer-use"
@@ -195,10 +195,15 @@ begin
     Only replaces OLD defaults — users who customized a non-default value
     keep their tuning. Matches both compact and spaced JSON formats. }
 
-  { capture.interval_seconds: 15 -> 3 (offline analysis wants 3s) }
-  StringChange(S, '"interval_seconds": 15',  '"interval_seconds": 3');
-  StringChange(S, '"interval_seconds":15',   '"interval_seconds": 3');
-  StringChange(S, '"interval_seconds": 15.0','"interval_seconds": 3');
+  { capture.interval_seconds: migrate known OLD defaults to new default (1s).
+    Only replaces values that were the exact default of a prior version — a
+    user who set a custom value like 2 or 5 keeps their tuning. }
+  StringChange(S, '"interval_seconds": 15',  '"interval_seconds": 1');
+  StringChange(S, '"interval_seconds":15',   '"interval_seconds": 1');
+  StringChange(S, '"interval_seconds": 15.0','"interval_seconds": 1');
+  StringChange(S, '"interval_seconds": 3',   '"interval_seconds": 1');
+  StringChange(S, '"interval_seconds":3',    '"interval_seconds": 1');
+  StringChange(S, '"interval_seconds": 3.0', '"interval_seconds": 1');
 
   { session.max_duration_seconds: 3600 -> 0 (unlimited by default since v0.3.3) }
   StringChange(S, '"max_duration_seconds": 3600',  '"max_duration_seconds": 0');
@@ -249,7 +254,7 @@ begin
     Lines.Add('    "retry_backoff_base": 2.0');
     Lines.Add('  },');
     Lines.Add('  "capture": {');
-    Lines.Add('    "interval_seconds": 3');
+    Lines.Add('    "interval_seconds": 1');
     Lines.Add('  },');
     Lines.Add('  "server": {');
     Lines.Add('    "enabled": true,');

@@ -4,7 +4,7 @@ service:
   run_as_service: false  # true to run as Windows service
 
 capture:
-  interval_seconds: 3          # Screenshot frequency
+  interval_seconds: 1          # Screenshot frequency
   monitor: 0                   # 0=primary, -1=all monitors
   image_format: "png"
   image_quality: 85            # JPEG quality (ignored for PNG)
