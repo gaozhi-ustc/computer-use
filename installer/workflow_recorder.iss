@@ -1,5 +1,5 @@
 #define MyAppName "Workflow Recorder"
-#define MyAppVersion "0.4.1"
+#define MyAppVersion "0.4.2"
 #define MyAppPublisher "Workflow Recorder"
 #define MyAppExeName "workflow-recorder.exe"
 #define MyAppURL "https://github.com/gaozhi-ustc/computer-use"
@@ -249,7 +249,7 @@ begin
     Lines.Add('    "retry_backoff_base": 2.0');
     Lines.Add('  },');
     Lines.Add('  "capture": {');
-    Lines.Add('    "interval_seconds": 15');
+    Lines.Add('    "interval_seconds": 3');
     Lines.Add('  },');
     Lines.Add('  "server": {');
     Lines.Add('    "enabled": true,');
