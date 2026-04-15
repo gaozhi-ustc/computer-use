@@ -136,7 +136,7 @@ def _startup() -> None:
         global _session_finalizer_thread
         import threading
         from server.session_finalizer import SessionFinalizer
-        stop_event = _analysis_pool._stop_event
+        stop_event = _analysis_pool._stop
         finalizer = SessionFinalizer(stop_event=stop_event)
         _session_finalizer_thread = threading.Thread(
             target=finalizer.run, daemon=True, name="session-finalizer",

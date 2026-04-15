@@ -49,6 +49,7 @@ const employeeFilter = ref('')
 const dateRange = ref<[number, number] | null>(null)
 const selectedSessionId = ref('')
 const generatingSop = ref(false)
+const analyzingSession = ref(false)
 
 async function generateSop() {
   if (!selectedSession.value) return
@@ -67,6 +68,21 @@ async function generateSop() {
     message.error('生成 SOP 失败')
   } finally {
     generatingSop.value = false
+  }
+}
+
+async function analyzeSession() {
+  if (!selectedSession.value) return
+  analyzingSession.value = true
+  try {
+    await sessionsApi.analyze(selectedSession.value.session_id)
+    message.success('Session 分析已触发，后台正在处理分组与 SOP 生成')
+    await fetchSessions()
+  } catch (e: any) {
+    const detail = e?.response?.data?.detail || '触发分析失败'
+    message.error(detail)
+  } finally {
+    analyzingSession.value = false
   }
 }
 
@@ -260,10 +276,17 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
                 <NButton
                   v-if="auth.isAdmin || auth.isManager"
                   type="primary"
+                  :loading="analyzingSession"
+                  @click="analyzeSession"
+                >
+                  分析此会话并生成 SOP
+                </NButton>
+                <NButton
+                  v-if="auth.isAdmin || auth.isManager"
                   :loading="generatingSop"
                   @click="generateSop"
                 >
-                  从此会话生成 SOP
+                  从此会话生成 SOP（旧版）
                 </NButton>
               </NSpace>
 

@@ -105,7 +105,7 @@ class StepInfo(BaseModel):
     description: str = ""
     application: str = ""
     action_type: str = ""
-    action_detail: dict = Field(default_factory=dict)
+    action_detail: dict | list = Field(default_factory=dict)
     screenshot_ref: str = ""
     source_frame_ids: list[int] = Field(default_factory=list)
     confidence: float = 0.0
@@ -129,7 +129,7 @@ class StepCreate(BaseModel):
     description: str = ""
     application: str = ""
     action_type: str = ""
-    action_detail: dict = Field(default_factory=dict)
+    action_detail: dict | list = Field(default_factory=dict)
     screenshot_ref: str = ""
     source_frame_ids: list[int] = Field(default_factory=list)
     confidence: float = 0.0
@@ -141,7 +141,7 @@ class StepUpdate(BaseModel):
     step_order: Optional[int] = None
     application: Optional[str] = None
     action_type: Optional[str] = None
-    action_detail: Optional[dict] = None
+    action_detail: Optional[dict | list] = None
     screenshot_ref: Optional[str] = None
     source_frame_ids: Optional[list[int]] = None
     confidence: Optional[float] = None

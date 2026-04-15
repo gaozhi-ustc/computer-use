@@ -7,6 +7,7 @@ export interface SessionInfo {
   last_frame_at: string
   frame_count: number
   applications: string[]
+  status?: string
 }
 
 export interface SessionListResponse {
@@ -53,4 +54,6 @@ export const sessionsApi = {
     client.get<SessionListResponse>('/api/sessions/', { params }),
   detail: (sessionId: string) =>
     client.get<SessionDetail>(`/api/sessions/${sessionId}`),
+  analyze: (sessionId: string) =>
+    client.post<{ ok: boolean; session_id: string; status: string }>(`/api/sessions/${sessionId}/analyze`),
 }

@@ -8,37 +8,45 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-GROUP_SYSTEM_PROMPT = """You are a workflow SOP extraction expert. You will receive a sequence of screenshots captured over time, along with mouse cursor coordinates and focus region data for each frame.
+GROUP_SYSTEM_PROMPT = """You are a workflow SOP extraction expert. You will receive a sequence of screenshots captured over time, along with OS-level mouse cursor coordinates for each frame.
 
-Your task: identify the discrete user actions and produce reproducible SOP steps.
+IMPORTANT — How to use cursor data to identify actions:
+- The cursor coordinates are captured by the OS every few seconds (not on every mouse event).
+- When the cursor jumps to a new position between frames and then stays still for 1-2 frames, the user almost certainly CLICKED at that position. The screenshot AFTER the jump shows the result of the click.
+- I have pre-analyzed the cursor movement and marked frames with "⚡ LIKELY CLICK" where a significant cursor jump was detected. Use these as strong evidence of a user action.
+- For each LIKELY CLICK, look at the screenshot to identify WHAT UI element is at those coordinates, and what changed between the frame before and after.
+- Cursor staying in the same position across multiple frames usually means the user is reading/waiting — not a separate action.
+
+Your task: for each detected user action, produce a reproducible SOP step that describes HOW to transition from the current state to the next state.
 
 For each step, output:
 {
     "step_order": <int>,
-    "title": "<short action title>",
-    "human_description": "<detailed description a human can follow to reproduce this action, including specific UI elements, their locations, and what to look for>",
+    "title": "<short action verb phrase, e.g. 'Click Export button', 'Select date range'>",
+    "human_description": "<step-by-step instruction a human can follow: what to look for on screen, where to click/type, and what should happen after>",
     "machine_actions": [
         {
             "type": "click|double_click|right_click|type|key|scroll|drag",
-            "x": <pixel x>,
-            "y": <pixel y>,
-            "target": "<UI element name>",
+            "x": <pixel x from cursor data>,
+            "y": <pixel y from cursor data>,
+            "target": "<UI element name visible at those coordinates>",
             "text": "<for type actions>",
             "key": "<for key actions, e.g. Enter, Ctrl+S>"
         }
     ],
     "application": "<application name>",
-    "key_frame_indices": [<indices within this group that best represent this step>]
+    "key_frame_indices": [<frame index AFTER the action that shows the result>]
 }
 
 Return a JSON object: {"steps": [...]}
 
 Guidelines:
-- One step = one logical user action (may span multiple frames)
-- Include precise coordinates from the cursor data provided
-- human_description should be detailed enough for someone unfamiliar with the workflow
-- machine_actions should be precise enough for RPA replay
-- key_frame_indices reference the 0-based index within the provided image sequence"""
+- Focus on ACTIONS (click, type, select, scroll), not on passive states (viewing, reading)
+- Every step must describe what the user DID, not what the screen shows
+- Use the ⚡ LIKELY CLICK markers and cursor coordinates as primary evidence for actions
+- machine_actions coordinates MUST come from the actual cursor data, not guessed from screenshots
+- If multiple frames show no cursor movement and no screen change, they represent ONE state — do not create separate steps for them
+- human_description should tell the reader exactly where to click and what to expect after clicking"""
 
 REFINE_SYSTEM_PROMPT = """You are an SOP refinement assistant. You will receive:
 1. The original screenshot sequence from a workflow recording
@@ -59,19 +67,62 @@ class GroupAnalysisInput:
 
 
 def build_user_prompt(frames: list[dict[str, Any]]) -> str:
-    """Build the text portion of the user message."""
-    lines = [f"Here are {len(frames)} sequential screenshots from a recording session.",
-             "For each frame I provide: timestamp, cursor position (x, y), and focus region [x1, y1, x2, y2] if available.",
-             "",
-             "Frame data:"]
+    """Build the text portion of the user message with cursor-jump analysis."""
+    import math
+
+    lines = [
+        f"Here are {len(frames)} sequential screenshots from a recording session.",
+        "For each frame I provide: timestamp, cursor position, and whether a likely click was detected.",
+        "",
+    ]
+
+    # Pre-compute cursor jumps to detect likely clicks
+    CLICK_THRESHOLD = 50  # pixels — movement above this between frames = likely click
+    click_frames: list[int] = []
+
+    for i in range(1, len(frames)):
+        cx1 = frames[i - 1].get("cursor_x", -1)
+        cy1 = frames[i - 1].get("cursor_y", -1)
+        cx2 = frames[i].get("cursor_x", -1)
+        cy2 = frames[i].get("cursor_y", -1)
+        if cx1 >= 0 and cy1 >= 0 and cx2 >= 0 and cy2 >= 0:
+            dist = math.sqrt((cx2 - cx1) ** 2 + (cy2 - cy1) ** 2)
+            if dist > CLICK_THRESHOLD:
+                click_frames.append(i)
+
+    lines.append(f"Detected {len(click_frames)} likely click actions based on cursor movement.")
+    lines.append("")
+    lines.append("Frame data:")
+
     for i, f in enumerate(frames):
         cx = f.get("cursor_x", -1)
         cy = f.get("cursor_y", -1)
-        fr = f.get("focus_rect") or "none"
         ts = f.get("recorded_at", "unknown")
-        lines.append(f"- Frame {i}: timestamp={ts}, cursor=({cx}, {cy}), focus_rect={fr}")
+        fr = f.get("focus_rect") or None
+
+        # Compute movement from previous frame
+        move_info = ""
+        if i > 0:
+            px = frames[i - 1].get("cursor_x", -1)
+            py = frames[i - 1].get("cursor_y", -1)
+            if px >= 0 and py >= 0 and cx >= 0 and cy >= 0:
+                dist = math.sqrt((cx - px) ** 2 + (cy - py) ** 2)
+                if dist > CLICK_THRESHOLD:
+                    move_info = f" ⚡ LIKELY CLICK (cursor moved {int(dist)}px from ({px},{py}))"
+                elif dist < 5:
+                    move_info = " (cursor stable)"
+
+        focus_str = f", focus_rect={fr}" if fr else ""
+        lines.append(
+            f"- Frame {i}: timestamp={ts}, cursor=({cx}, {cy}){focus_str}{move_info}"
+        )
+
     lines.append("")
-    lines.append("Please extract the SOP steps from this image sequence.")
+    lines.append(
+        "Based on the screenshots and cursor data above, extract the ACTION steps. "
+        "Focus on what the user DID at each ⚡ LIKELY CLICK point — identify the UI element "
+        "at the click coordinates, and describe the action and its effect."
+    )
     return "\n".join(lines)
 
 

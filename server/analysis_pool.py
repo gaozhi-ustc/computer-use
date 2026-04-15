@@ -150,8 +150,17 @@ def _auto_create_sop(session_id: str, employee_id: str) -> None:
 
     for g in groups:
         group_ids.append(g["id"])
+        frame_ids = json.loads(g["frame_ids_json"]) if g.get("frame_ids_json") else []
         result = db.get_group_analysis_result(session_id, g["group_index"])
         if result:
+            for step in result:
+                # Map group-relative key_frame_indices to actual DB frame IDs
+                raw_indices = step.get("key_frame_indices", [])
+                resolved_ids = []
+                for idx in raw_indices:
+                    if isinstance(idx, int) and 0 <= idx < len(frame_ids):
+                        resolved_ids.append(frame_ids[idx])
+                step["_resolved_frame_ids"] = resolved_ids
             all_steps.extend(result)
 
     for i, step in enumerate(all_steps):
@@ -173,7 +182,7 @@ def _auto_create_sop(session_id: str, employee_id: str) -> None:
             action_type=step.get("machine_actions", [{}])[0].get("type", "")
                 if step.get("machine_actions") else "",
             action_detail=step.get("machine_actions", []),
-            source_frame_ids=step.get("key_frame_indices", []),
+            source_frame_ids=step.get("_resolved_frame_ids", []),
             confidence=0.0,
             human_description=step.get("human_description", ""),
             machine_actions=step.get("machine_actions", []),
