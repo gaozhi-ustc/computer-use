@@ -166,12 +166,22 @@ const focusOverlay = computed(() => {
   position: absolute;
   border: 2px solid #f00;
   border-radius: 2px;
-  box-shadow: 0 0 6px rgba(255, 0, 0, 0.6);
+  /* White rings on both sides of the red border create a 白-红-白
+     sandwich that stays visible on red/orange/pink backgrounds. */
+  box-shadow:
+    inset 0 0 0 2px #fff,
+    0 0 0 2px #fff,
+    0 0 8px rgba(255, 0, 0, 0.9);
   pointer-events: none;
 }
 .focus-overlay {
   position: absolute;
   border: 2px dashed #fc0;
+  /* Same technique, tuned down since focus rect is usually larger
+     and yellow vs background is less of a conflict case. */
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(0, 0, 0, 0.6);
   pointer-events: none;
 }
 </style>
