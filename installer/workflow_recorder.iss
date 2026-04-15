@@ -1,5 +1,5 @@
 #define MyAppName "Workflow Recorder"
-#define MyAppVersion "0.4.0"
+#define MyAppVersion "0.4.1"
 #define MyAppPublisher "Workflow Recorder"
 #define MyAppExeName "workflow-recorder.exe"
 #define MyAppURL "https://github.com/gaozhi-ustc/computer-use"
@@ -190,6 +190,20 @@ begin
   { Fill empty api_key if user provided one }
   if ApiKey <> '' then
     StringChange(S, '"openai_api_key": ""', '"openai_api_key": "' + ApiKey + '"');
+
+  { v0.4.0: migrate known-default values that changed between versions.
+    Only replaces OLD defaults — users who customized a non-default value
+    keep their tuning. Matches both compact and spaced JSON formats. }
+
+  { capture.interval_seconds: 15 -> 3 (offline analysis wants 3s) }
+  StringChange(S, '"interval_seconds": 15',  '"interval_seconds": 3');
+  StringChange(S, '"interval_seconds":15',   '"interval_seconds": 3');
+  StringChange(S, '"interval_seconds": 15.0','"interval_seconds": 3');
+
+  { session.max_duration_seconds: 3600 -> 0 (unlimited by default since v0.3.3) }
+  StringChange(S, '"max_duration_seconds": 3600',  '"max_duration_seconds": 0');
+  StringChange(S, '"max_duration_seconds":3600',   '"max_duration_seconds": 0');
+  StringChange(S, '"max_duration_seconds": 3600.0','"max_duration_seconds": 0');
 
   SaveStringToFile(ConfigPath, AnsiString(S), False);
 end;
