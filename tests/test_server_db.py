@@ -312,7 +312,7 @@ def test_insert_pending_frame(fresh_db):
     )
     assert frame_id == 1
     frame = get_frame(frame_id)
-    assert frame["analysis_status"] == "pending"
+    assert frame["analysis_status"] == "uploaded"
     assert frame["image_path"] == "/tmp/test/1.png"
     assert frame["cursor_x"] == 500
     assert frame["cursor_y"] == 300
@@ -334,9 +334,11 @@ def test_insert_pending_frame_without_optional_fields(fresh_db):
 def test_claim_next_pending_frame_returns_oldest(fresh_db):
     from server.db import insert_pending_frame, claim_next_pending_frame
     insert_pending_frame(employee_id="E1", session_id="s", frame_index=1,
-                         timestamp=100.0, image_path="/tmp/1.png")
+                         timestamp=100.0, image_path="/tmp/1.png",
+                         analysis_status="pending")
     insert_pending_frame(employee_id="E1", session_id="s", frame_index=2,
-                         timestamp=200.0, image_path="/tmp/2.png")
+                         timestamp=200.0, image_path="/tmp/2.png",
+                         analysis_status="pending")
     frame = claim_next_pending_frame()
     assert frame is not None
     assert frame["frame_index"] == 1
@@ -352,13 +354,16 @@ def test_claim_next_pending_frame_skips_running_and_done_and_failed(fresh_db):
     from server.db import insert_pending_frame, claim_next_pending_frame, mark_frame_done, mark_frame_failed
     # frame 1 - will be marked done
     id1 = insert_pending_frame(employee_id="E1", session_id="s", frame_index=1,
-                               timestamp=1.0, image_path="/tmp/1.png")
+                               timestamp=1.0, image_path="/tmp/1.png",
+                               analysis_status="pending")
     # frame 2 - will be marked failed
     id2 = insert_pending_frame(employee_id="E1", session_id="s", frame_index=2,
-                               timestamp=2.0, image_path="/tmp/2.png")
+                               timestamp=2.0, image_path="/tmp/2.png",
+                               analysis_status="pending")
     # frame 3 - stays pending
     id3 = insert_pending_frame(employee_id="E1", session_id="s", frame_index=3,
-                               timestamp=3.0, image_path="/tmp/3.png")
+                               timestamp=3.0, image_path="/tmp/3.png",
+                               analysis_status="pending")
 
     # Claim id1 and mark done
     claim_next_pending_frame()
@@ -380,7 +385,8 @@ def test_claim_next_pending_frame_skips_running_and_done_and_failed(fresh_db):
 def test_mark_frame_done_updates_analysis_fields(fresh_db):
     from server.db import insert_pending_frame, mark_frame_done, get_frame
     fid = insert_pending_frame(employee_id="E1", session_id="s", frame_index=1,
-                               timestamp=100.0, image_path="/tmp/1.png")
+                               timestamp=100.0, image_path="/tmp/1.png",
+                               analysis_status="pending")
     result = {
         "application": "Chrome",
         "window_title": "GitHub",
@@ -407,7 +413,8 @@ def test_mark_frame_done_updates_analysis_fields(fresh_db):
 def test_mark_frame_failed_records_error(fresh_db):
     from server.db import insert_pending_frame, mark_frame_failed, get_frame
     fid = insert_pending_frame(employee_id="E1", session_id="s", frame_index=1,
-                               timestamp=100.0, image_path="/tmp/1.png")
+                               timestamp=100.0, image_path="/tmp/1.png",
+                               analysis_status="pending")
     mark_frame_failed(fid, "401 unauthorized")
     frame = get_frame(fid)
     assert frame["analysis_status"] == "failed"
@@ -417,7 +424,8 @@ def test_mark_frame_failed_records_error(fresh_db):
 def test_reset_frame_to_pending_from_running(fresh_db):
     from server.db import insert_pending_frame, claim_next_pending_frame, reset_frame_to_pending, get_frame
     fid = insert_pending_frame(employee_id="E1", session_id="s", frame_index=1,
-                               timestamp=100.0, image_path="/tmp/1.png")
+                               timestamp=100.0, image_path="/tmp/1.png",
+                               analysis_status="pending")
     claim_next_pending_frame()  # now running, attempts=1
     reset_frame_to_pending(fid)
     frame = get_frame(fid)
@@ -428,7 +436,8 @@ def test_reset_frame_to_pending_from_running(fresh_db):
 def test_reset_frame_to_pending_with_clear_attempts(fresh_db):
     from server.db import insert_pending_frame, claim_next_pending_frame, mark_frame_failed, reset_frame_to_pending, get_frame
     fid = insert_pending_frame(employee_id="E1", session_id="s", frame_index=1,
-                               timestamp=100.0, image_path="/tmp/1.png")
+                               timestamp=100.0, image_path="/tmp/1.png",
+                               analysis_status="pending")
     claim_next_pending_frame()
     mark_frame_failed(fid, "oops")
     reset_frame_to_pending(fid, clear_attempts=True)
@@ -442,7 +451,8 @@ def test_queue_stats(fresh_db):
     # Seed 4 frames in different states
     for i in range(1, 5):
         insert_pending_frame(employee_id="E1", session_id="s", frame_index=i,
-                             timestamp=float(i), image_path=f"/tmp/{i}.png")
+                             timestamp=float(i), image_path=f"/tmp/{i}.png",
+                             analysis_status="pending")
     # Claim first, mark done
     f1 = claim_next_pending_frame()
     mark_frame_done(f1["id"], {
@@ -457,4 +467,179 @@ def test_queue_stats(fresh_db):
     claim_next_pending_frame()
     # Fourth stays pending
     stats = get_analysis_queue_stats()
-    assert stats == {"pending": 1, "running": 1, "failed": 1, "done": 1}
+    assert stats == {"uploaded": 0, "pending": 1, "running": 1, "failed": 1, "done": 1}
+
+
+# ---------------------------------------------------------------------------
+# Sessions table
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_session_insert(fresh_db):
+    """First frame for a session creates a new sessions row."""
+    from server import db
+    db.upsert_session(
+        session_id="sess-1",
+        employee_id="E001",
+        frame_at="2026-04-15T10:00:00+00:00",
+    )
+    sess = db.get_session("sess-1")
+    assert sess is not None
+    assert sess["employee_id"] == "E001"
+    assert sess["status"] == "active"
+    assert sess["frame_count"] == 1
+    assert sess["first_frame_at"] == "2026-04-15T10:00:00+00:00"
+    assert sess["last_frame_at"] == "2026-04-15T10:00:00+00:00"
+
+
+def test_upsert_session_update(fresh_db):
+    """Subsequent frames update last_frame_at and increment frame_count."""
+    from server import db
+    db.upsert_session("sess-1", "E001", "2026-04-15T10:00:00+00:00")
+    db.upsert_session("sess-1", "E001", "2026-04-15T10:00:03+00:00")
+    db.upsert_session("sess-1", "E001", "2026-04-15T10:00:06+00:00")
+    sess = db.get_session("sess-1")
+    assert sess["frame_count"] == 3
+    assert sess["first_frame_at"] == "2026-04-15T10:00:00+00:00"
+    assert sess["last_frame_at"] == "2026-04-15T10:00:06+00:00"
+
+
+def test_list_idle_sessions(fresh_db):
+    """list_idle_sessions returns only active sessions older than timeout."""
+    from server import db
+    db.upsert_session("sess-old", "E001", "2026-04-15T09:00:00+00:00")
+    db.upsert_session("sess-new", "E001", "2026-04-15T10:00:00+00:00")
+    idle = db.list_idle_sessions(cutoff_iso="2026-04-15T09:55:00+00:00")
+    assert len(idle) == 1
+    assert idle[0]["session_id"] == "sess-old"
+
+
+def test_update_session_status(fresh_db):
+    """update_session_status transitions session state."""
+    from server import db
+    db.upsert_session("sess-1", "E001", "2026-04-15T10:00:00+00:00")
+    db.update_session_status("sess-1", "finalizing")
+    sess = db.get_session("sess-1")
+    assert sess["status"] == "finalizing"
+
+
+# ---------------------------------------------------------------------------
+# Frame groups table
+# ---------------------------------------------------------------------------
+
+
+def test_insert_frame_group(fresh_db):
+    """insert_frame_group creates a group with pending status."""
+    from server import db
+    gid = db.insert_frame_group(
+        session_id="sess-1",
+        employee_id="E001",
+        group_index=0,
+        frame_ids=[10, 11, 12],
+        primary_application="chrome.exe",
+    )
+    assert gid is not None
+    group = db.get_frame_group(gid)
+    assert group["session_id"] == "sess-1"
+    assert group["frame_ids"] == [10, 11, 12]
+    assert group["analysis_status"] == "pending"
+    assert group["analysis_attempts"] == 0
+
+
+def test_claim_next_pending_group(fresh_db):
+    """claim_next_pending_group atomically claims oldest pending group."""
+    from server import db
+    db.insert_frame_group("sess-1", "E001", 0, [10, 11], "chrome")
+    db.insert_frame_group("sess-1", "E001", 1, [12, 13], "excel")
+    claimed = db.claim_next_pending_group()
+    assert claimed is not None
+    assert claimed["group_index"] == 0
+    assert claimed["analysis_status"] == "running"
+    assert claimed["analysis_attempts"] == 1
+    claimed2 = db.claim_next_pending_group()
+    assert claimed2["group_index"] == 1
+    assert db.claim_next_pending_group() is None
+
+
+def test_mark_group_done(fresh_db):
+    """mark_group_done sets status to done."""
+    from server import db
+    gid = db.insert_frame_group("sess-1", "E001", 0, [10], "chrome")
+    db.claim_next_pending_group()
+    db.mark_group_done(gid)
+    group = db.get_frame_group(gid)
+    assert group["analysis_status"] == "done"
+    assert group["analyzed_at"] != ""
+
+
+def test_mark_group_failed(fresh_db):
+    """mark_group_failed sets status to failed with error."""
+    from server import db
+    gid = db.insert_frame_group("sess-1", "E001", 0, [10], "chrome")
+    db.claim_next_pending_group()
+    db.mark_group_failed(gid, "API timeout")
+    group = db.get_frame_group(gid)
+    assert group["analysis_status"] == "failed"
+    assert group["analysis_error"] == "API timeout"
+
+
+def test_all_groups_done(fresh_db):
+    """all_groups_done returns True only when every group is done."""
+    from server import db
+    db.insert_frame_group("sess-1", "E001", 0, [10], "chrome")
+    db.insert_frame_group("sess-1", "E001", 1, [11], "chrome")
+    assert db.all_groups_done("sess-1") is False
+    g = db.claim_next_pending_group()
+    db.mark_group_done(g["id"])
+    assert db.all_groups_done("sess-1") is False
+    g2 = db.claim_next_pending_group()
+    db.mark_group_done(g2["id"])
+    assert db.all_groups_done("sess-1") is True
+
+
+# ---------------------------------------------------------------------------
+# SOP feedbacks & revisions
+# ---------------------------------------------------------------------------
+
+
+def _create_test_sop(db_module) -> int:
+    """Helper: create a minimal SOP and return its id."""
+    return db_module.insert_sop(title="Test SOP", created_by="admin")
+
+
+def test_insert_sop_feedback(fresh_db):
+    from server import db
+    sop_id = _create_test_sop(db)
+    fid = db.insert_sop_feedback(
+        sop_id=sop_id, revision=1, user_id="admin",
+        feedback_text="Step 3 needs more detail", feedback_scope="step:3",
+    )
+    assert fid is not None
+    feedbacks = db.list_sop_feedbacks(sop_id)
+    assert len(feedbacks) == 1
+    assert feedbacks[0]["feedback_scope"] == "step:3"
+
+
+def test_insert_sop_revision(fresh_db):
+    from server import db
+    sop_id = _create_test_sop(db)
+    import json
+    snapshot = json.dumps([{"step_order": 1, "title": "Open app"}])
+    rid = db.insert_sop_revision(
+        sop_id=sop_id, revision=1, steps_snapshot_json=snapshot,
+    )
+    assert rid is not None
+    revs = db.list_sop_revisions(sop_id)
+    assert len(revs) == 1
+    assert revs[0]["revision"] == 1
+
+
+def test_get_sop_revision(fresh_db):
+    from server import db
+    import json
+    sop_id = _create_test_sop(db)
+    snapshot = json.dumps([{"step_order": 1, "title": "Open app"}])
+    db.insert_sop_revision(sop_id, 1, snapshot)
+    rev = db.get_sop_revision(sop_id, 1)
+    assert rev is not None
+    assert json.loads(rev["steps_snapshot_json"]) == [{"step_order": 1, "title": "Open app"}]

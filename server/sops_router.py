@@ -31,6 +31,7 @@ _VALID_TRANSITIONS: dict[str, set[str]] = {
     "draft": {"in_review"},
     "in_review": {"published", "draft"},  # draft = reject
     "published": set(),                    # terminal state
+    "regenerating": {"draft"},             # regeneration complete → back to draft
 }
 
 

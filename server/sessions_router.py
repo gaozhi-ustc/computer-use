@@ -19,6 +19,7 @@ class SessionInfo(BaseModel):
     last_frame_at: str
     frame_count: int
     applications: list[str] = Field(default_factory=list)
+    status: str = "active"
 
 
 class SessionListResponse(BaseModel):
@@ -59,6 +60,15 @@ def list_sessions(
     total = db.count_sessions(
         **{k: v for k, v in kwargs.items() if k not in ("date_from", "date_to")},
     )
+
+    # Enrich with status from sessions table
+    for s in sessions:
+        sess_record = db.get_session(s["session_id"])
+        if sess_record:
+            s["status"] = sess_record["status"]
+        else:
+            s["status"] = "active"
+
     return SessionListResponse(
         total=total,
         count=len(sessions),

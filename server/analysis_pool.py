@@ -1,17 +1,21 @@
-"""Background worker pool that analyzes pending frames using qwen.
+"""AnalysisPool — per-API-key worker threads for group-level frame analysis.
 
-One AnalysisWorker per DashScope API key. Each worker:
-- Polls the DB's pending queue (atomic claim via UPDATE ... RETURNING)
-- Calls VisionClient.analyze_frame for each claimed frame
-- On success: mark_frame_done with the analysis result
-- On failure: reset to pending (for retry) or mark_frame_failed after 3 attempts
-- Sleeps briefly when queue is empty
+Each worker thread:
+1. Claims the next pending frame_group (atomic UPDATE...RETURNING)
+2. Loads all frame images + metadata for the group
+3. Calls the vision API with multi-image prompt
+4. Parses response into SOP steps
+5. Writes steps to DB, marks group as done
+6. When all groups for a session are done, auto-creates SOP
 """
 
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,103 +25,173 @@ from server import db
 
 log = structlog.get_logger()
 
-
-# How long a worker waits between polls when the queue is empty
 EMPTY_QUEUE_POLL_INTERVAL_SECONDS = 2.0
-
-# Max consecutive failures before marking a frame 'failed' permanently
 MAX_ANALYSIS_ATTEMPTS = 3
 
 
 class AnalysisWorker:
-    """One worker bound to one API key."""
+    """One worker per API key — processes frame groups."""
 
-    def __init__(
-        self,
-        key: str,
-        key_index: int,
-        stop_event: threading.Event,
-        vision_client: Any = None,  # injected for tests; None = build real one
-    ):
+    def __init__(self, key: str, key_index: int, stop_event: threading.Event,
+                 vision_client: Any = None):
         self.key = key
-        self.key_index = key_index
         self.label = f"worker-{key_index}"
         self._stop = stop_event
-        self._vision = vision_client if vision_client is not None else self._build_vision()
+        self._client = vision_client
 
-    def _build_vision(self):
-        """Build a real VisionClient using this worker's API key."""
-        from workflow_recorder.analysis.vision_client import VisionClient
-        from workflow_recorder.config import AnalysisConfig
-        cfg = AnalysisConfig(
-            openai_api_key=self.key,
+    def _build_client(self):
+        """Build OpenAI client for multi-image calls."""
+        from openai import OpenAI
+        return OpenAI(
+            api_key=self.key,
             base_url="https://coding.dashscope.aliyuncs.com/v1",
-            model="qwen3.5-plus",
-            detail="low",
-            max_tokens=1000,
-            temperature=0.1,
         )
-        return VisionClient(cfg)
 
     def run(self) -> None:
-        """Main loop: claim → analyze → repeat. Stops when stop_event is set."""
         log.info("analysis_worker_started", label=self.label)
+        client = self._client or self._build_client()
+
         while not self._stop.is_set():
-            frame = db.claim_next_pending_frame()
-            if frame is None:
-                # Queue empty — wait (interruptible by stop_event)
+            group = db.claim_next_pending_group()
+            if group is None:
                 self._stop.wait(timeout=EMPTY_QUEUE_POLL_INTERVAL_SECONDS)
                 continue
-            self._analyze_one(frame)
+            try:
+                self._analyze_group(client, group)
+            except Exception as exc:
+                log.exception("group_analysis_error",
+                              group_id=group["id"], label=self.label)
+                self._handle_failure(group["id"], group["analysis_attempts"],
+                                     str(exc))
+
         log.info("analysis_worker_stopped", label=self.label)
 
-    def _analyze_one(self, frame: dict) -> None:
-        """Analyze a single claimed frame and update the DB accordingly."""
-        frame_id = frame["id"]
-        attempts = frame.get("analysis_attempts", 0)
-        try:
-            result = self._vision.analyze_frame(
-                image_path=Path(frame["image_path"]),
-                window_context=None,
-                frame_index=frame["frame_index"],
-                timestamp=None,
-            )
-            if result is None:
-                self._handle_failure(frame_id, attempts, "empty response")
-                return
-            db.mark_frame_done(frame_id, result.model_dump())
-            log.debug("frame_analyzed", frame_id=frame_id,
-                      worker=self.label, frame_index=frame["frame_index"])
-        except Exception as exc:
-            self._handle_failure(frame_id, attempts, f"{type(exc).__name__}: {exc}")
+    def _analyze_group(self, client: Any, group: dict) -> None:
+        from server.group_analysis import (
+            GROUP_SYSTEM_PROMPT, build_user_prompt,
+            build_image_content_blocks, parse_steps_response,
+        )
 
-    def _handle_failure(self, frame_id: int, attempts: int, reason: str) -> None:
-        """Retry by resetting to pending, or mark failed after MAX_ANALYSIS_ATTEMPTS."""
+        group_id = group["id"]
+        session_id = group["session_id"]
+        frame_ids = group["frame_ids"]
+
+        # Load frames ordered by frame_index
+        frames = []
+        for fid in frame_ids:
+            f = db.get_frame(fid)
+            if f:
+                frames.append(f)
+        frames.sort(key=lambda f: f.get("frame_index", 0))
+
+        if not frames:
+            db.mark_group_failed(group_id, "no frames found")
+            return
+
+        # Build multi-image prompt
+        user_text = build_user_prompt(frames)
+        image_blocks = build_image_content_blocks(frames)
+
+        if not image_blocks:
+            db.mark_group_failed(group_id, "no valid images")
+            return
+
+        content: list[dict] = [{"type": "text", "text": user_text}] + image_blocks
+
+        model = os.environ.get("ANALYSIS_MODEL", "qwen3.6-plus")
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": GROUP_SYSTEM_PROMPT},
+                {"role": "user", "content": content},
+            ],
+            max_tokens=4000,
+            temperature=0.1,
+        )
+
+        raw_text = response.choices[0].message.content or ""
+        steps = parse_steps_response(raw_text)
+
+        if not steps:
+            db.mark_group_failed(group_id, "empty steps from LLM")
+            return
+
+        db.mark_group_done(group_id)
+        _store_group_steps(session_id, group["group_index"], steps)
+
+        if db.all_groups_done(session_id):
+            _auto_create_sop(session_id, group["employee_id"])
+
+    def _handle_failure(self, group_id: int, attempts: int, reason: str) -> None:
         if attempts >= MAX_ANALYSIS_ATTEMPTS:
-            db.mark_frame_failed(frame_id, reason)
-            log.warning("frame_failed", frame_id=frame_id,
-                        worker=self.label, attempts=attempts, reason=reason)
+            db.mark_group_failed(group_id, reason)
+            log.warning("group_analysis_permanently_failed",
+                        group_id=group_id, reason=reason)
         else:
-            db.reset_frame_to_pending(frame_id)
-            log.info("frame_retry_scheduled", frame_id=frame_id,
-                     worker=self.label, attempts=attempts, reason=reason)
+            db.reset_group_to_pending(group_id)
+            log.info("group_analysis_retry",
+                     group_id=group_id, attempts=attempts)
+
+
+def _store_group_steps(session_id: str, group_index: int,
+                       steps: list[dict]) -> None:
+    """Persist group analysis steps for later SOP assembly."""
+    db.store_group_analysis_result(session_id, group_index, steps)
+
+
+def _auto_create_sop(session_id: str, employee_id: str) -> None:
+    """Create a draft SOP from all completed group analyses."""
+    log.info("auto_creating_sop", session_id=session_id)
+    db.update_session_status(session_id, "analyzed")
+
+    groups = db.list_frame_groups(session_id)
+    all_steps: list[dict] = []
+    group_ids: list[int] = []
+
+    for g in groups:
+        group_ids.append(g["id"])
+        result = db.get_group_analysis_result(session_id, g["group_index"])
+        if result:
+            all_steps.extend(result)
+
+    for i, step in enumerate(all_steps):
+        step["step_order"] = i + 1
+
+    sop_id = db.insert_sop(
+        title=f"SOP - {employee_id} / {session_id[:8]}",
+        created_by="system",
+    )
+    db.update_sop_group_ids(sop_id, group_ids)
+
+    for step in all_steps:
+        db.insert_sop_step(
+            sop_id=sop_id,
+            step_order=step.get("step_order", 0),
+            title=step.get("title", ""),
+            description=step.get("human_description", ""),
+            application=step.get("application", ""),
+            action_type=step.get("machine_actions", [{}])[0].get("type", "")
+                if step.get("machine_actions") else "",
+            action_detail=step.get("machine_actions", []),
+            source_frame_ids=step.get("key_frame_indices", []),
+            confidence=0.0,
+            human_description=step.get("human_description", ""),
+            machine_actions=step.get("machine_actions", []),
+        )
+
+    log.info("sop_auto_created", sop_id=sop_id, step_count=len(all_steps))
 
 
 class AnalysisPool:
-    """Manages the set of AnalysisWorker threads, one per API key."""
+    """Manages a pool of analysis worker threads, one per API key."""
 
-    def __init__(
-        self,
-        keys: list[str],
-        worker_factory=None,  # for tests to inject FakeVisionClient
-    ):
-        self._keys = list(keys)
-        self._worker_factory = worker_factory
-        self._stop_event = threading.Event()
+    def __init__(self, keys: list[str], worker_factory=None):
+        self._keys = keys
+        self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._worker_factory = worker_factory
 
     def start(self) -> None:
-        """Spawn one daemon thread per key."""
         if not self._keys:
             log.warning("analysis_pool_no_keys",
                         msg="api_keys.txt empty/missing — uploaded frames "
@@ -125,25 +199,20 @@ class AnalysisPool:
             return
 
         for i, key in enumerate(self._keys):
-            if self._worker_factory is not None:
-                worker = self._worker_factory(key, i, self._stop_event)
+            if self._worker_factory:
+                worker = self._worker_factory(key, i, self._stop)
             else:
-                worker = AnalysisWorker(key, i, self._stop_event)
-            t = threading.Thread(
-                target=worker.run,
-                name=f"analysis-worker-{i}",
-                daemon=True,
-            )
+                worker = AnalysisWorker(key, i, self._stop)
+            t = threading.Thread(target=worker.run, daemon=True,
+                                 name=f"analysis-worker-{i}")
             t.start()
             self._threads.append(t)
-
-        log.info("analysis_pool_started", worker_count=len(self._keys))
+        log.info("analysis_pool_started", worker_count=len(self._threads))
 
     def stop(self, timeout: float = 30.0) -> None:
-        """Signal all workers to exit and wait."""
         if not self._threads:
             return
-        self._stop_event.set()
+        self._stop.set()
         per_thread = max(1.0, timeout / len(self._threads))
         for t in self._threads:
             t.join(timeout=per_thread)

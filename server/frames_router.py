@@ -40,6 +40,7 @@ def upload_frame(
     cursor_x: int = Form(-1),
     cursor_y: int = Form(-1),
     focus_rect: str = Form(""),  # JSON array or empty
+    window_title_raw: str = Form(""),
     image: UploadFile = File(...),
     _auth=Depends(require_upload_key),
 ):
@@ -61,6 +62,8 @@ def upload_frame(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    db.upsert_session(session_id=session_id, employee_id=employee_id, frame_at=received_at)
+
     focus_rect_list = None
     if focus_rect.strip():
         try:
@@ -80,6 +83,7 @@ def upload_frame(
         cursor_x=int(cursor_x),
         cursor_y=int(cursor_y),
         focus_rect=focus_rect_list,
+        window_title_raw=window_title_raw,
     )
     if row_id is None:
         # Duplicate (same emp+session+frame_index). The file is now redundant

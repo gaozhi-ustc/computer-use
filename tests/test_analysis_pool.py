@@ -1,202 +1,223 @@
-"""Tests for AnalysisPool + AnalysisWorker."""
+"""Tests for AnalysisPool + AnalysisWorker (group-level analysis)."""
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
 
 # ---------------------------------------------------------------------------
-# AnalysisWorker tests with a mocked VisionClient
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-class FakeVisionClient:
-    """Stand-in for workflow_recorder.analysis.vision_client.VisionClient.
+def _fake_openai_response(steps_json: list[dict]) -> MagicMock:
+    """Build a mock OpenAI ChatCompletion response."""
+    resp = MagicMock()
+    resp.choices = [MagicMock()]
+    resp.choices[0].message.content = json.dumps({"steps": steps_json})
+    return resp
 
-    Return values are controlled via attributes set by the test.
-    """
 
-    def __init__(self, *args, **kwargs):
-        self.analyze_frame_calls: list[dict] = []
-        self._result = None
+class FakeOpenAIClient:
+    """Stand-in for openai.OpenAI client used in group analysis."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+        self._response = _fake_openai_response([
+            {"step_order": 1, "title": "Click button",
+             "human_description": "Click the Save button",
+             "machine_actions": [{"type": "click", "x": 100, "y": 200, "target": "Save"}],
+             "application": "chrome.exe",
+             "key_frame_indices": [0]}
+        ])
         self._raise: Exception | None = None
+        self.chat = MagicMock()
+        self.chat.completions.create = self._create
 
-    def set_result(self, result):
-        self._result = result
+    def set_response(self, steps: list[dict]):
+        self._response = _fake_openai_response(steps)
         self._raise = None
 
     def set_raise(self, exc: Exception):
         self._raise = exc
-        self._result = None
 
-    def analyze_frame(self, image_path: Path, window_context=None,
-                      frame_index: int = 0, timestamp=None):
-        self.analyze_frame_calls.append({
-            "image_path": image_path,
-            "frame_index": frame_index,
-            "timestamp": timestamp,
-        })
-        if self._raise is not None:
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._raise:
             raise self._raise
-        return self._result
-
-
-def _fake_analysis(frame_index: int):
-    """Build a FrameAnalysis-shaped object (only the fields mark_frame_done uses)."""
-    class FA:
-        def model_dump(self) -> dict:
-            return {
-                "frame_index": frame_index,
-                "timestamp": 100.0,
-                "application": "chrome.exe",
-                "window_title": "Test",
-                "user_action": "clicking Save",
-                "ui_elements_visible": [],
-                "text_content": "hello",
-                "mouse_position_estimate": [10, 20],
-                "confidence": 0.88,
-                "context_data": {"page_title": "Test"},
-            }
-    return FA()
+        return self._response
 
 
 @pytest.fixture
-def fresh_db_with_pending(tmp_path, monkeypatch):
-    """DB with 3 pending frames ready to be analyzed."""
+def fresh_db_with_groups(tmp_path, monkeypatch):
+    """DB with a session containing 3 frames and 1 pending group."""
     monkeypatch.setenv("WORKFLOW_SERVER_DB", str(tmp_path / "test.db"))
     from server import db
     db.init_db()
-    # Create dummy image files so the worker can "analyze" them
+
+    # Create dummy image files
     img_dir = tmp_path / "imgs"
     img_dir.mkdir()
+    frame_ids = []
     for i in range(1, 4):
         img = img_dir / f"{i}.png"
         img.write_bytes(b"\x89PNG" + b"\x00" * 50)
-        db.insert_pending_frame(
+        fid = db.insert_pending_frame(
             employee_id="E001", session_id="s1", frame_index=i,
             timestamp=float(i), image_path=str(img),
+            analysis_status="pending",
         )
+        frame_ids.append(fid)
+
+    # Create a session record
+    db.upsert_session(
+        session_id="s1", employee_id="E001",
+        frame_at="2026-04-15T10:00:00",
+    )
+
+    # Create a frame group
+    db.insert_frame_group(
+        session_id="s1", employee_id="E001",
+        group_index=0, frame_ids=frame_ids,
+        primary_application="chrome.exe",
+    )
+
     return db
 
 
-def test_worker_processes_pending_frame(fresh_db_with_pending):
+def test_worker_processes_pending_group(fresh_db_with_groups):
+    """Worker claims a group, calls the LLM, stores results, marks done."""
     from server.analysis_pool import AnalysisWorker
-    db = fresh_db_with_pending
-    fake_client = FakeVisionClient()
-    fake_client.set_result(_fake_analysis(frame_index=1))
+    db = fresh_db_with_groups
 
+    fake_client = FakeOpenAIClient()
     stop_event = threading.Event()
     worker = AnalysisWorker(
         key="sk-test", key_index=0, stop_event=stop_event,
-        vision_client=fake_client,  # injected for test
+        vision_client=fake_client,
     )
 
-    # Manually claim + analyze one (simulating one iteration)
-    frame = db.claim_next_pending_frame()
-    worker._analyze_one(frame)
+    # Run one iteration manually
+    group = db.claim_next_pending_group()
+    assert group is not None
+    worker._analyze_group(fake_client, group)
 
-    updated = db.get_frame(frame["id"])
-    assert updated["analysis_status"] == "done"
-    assert updated["application"] == "chrome.exe"
-    assert updated["user_action"] == "clicking Save"
-    assert updated["confidence"] == pytest.approx(0.88)
-    assert updated["context_data"] == {"page_title": "Test"}
+    # Group should be done
+    groups = db.list_frame_groups("s1")
+    assert groups[0]["analysis_status"] == "done"
 
-    # Worker must have been called with the right image
-    assert len(fake_client.analyze_frame_calls) == 1
-    assert fake_client.analyze_frame_calls[0]["frame_index"] == 1
+    # Steps should be stored
+    result = db.get_group_analysis_result("s1", 0)
+    assert result is not None
+    assert len(result) == 1
+    assert result[0]["title"] == "Click button"
+
+    # SOP should be auto-created (all groups done)
+    sops = db.list_sops()
+    assert len(sops) >= 1
+    assert "system" in sops[0]["created_by"]
 
 
-def test_worker_retries_on_exception_resets_to_pending(fresh_db_with_pending):
+def test_worker_retries_on_exception(fresh_db_with_groups):
+    """API failure resets group to pending for retry."""
     from server.analysis_pool import AnalysisWorker
-    db = fresh_db_with_pending
-    fake_client = FakeVisionClient()
+    db = fresh_db_with_groups
+
+    fake_client = FakeOpenAIClient()
     fake_client.set_raise(RuntimeError("api down"))
 
     stop_event = threading.Event()
     worker = AnalysisWorker("sk-test", 0, stop_event, vision_client=fake_client)
 
-    frame = db.claim_next_pending_frame()
-    worker._analyze_one(frame)
-    refreshed = db.get_frame(frame["id"])
-    # First failure: status goes back to 'pending', attempts stays at 1
-    assert refreshed["analysis_status"] == "pending"
-    assert refreshed["analysis_attempts"] == 1
+    group = db.claim_next_pending_group()
+    assert group is not None
+    # The run method catches exceptions, but we call _analyze_group directly
+    # which will raise; the run() method handles it via _handle_failure
+    try:
+        worker._analyze_group(fake_client, group)
+    except RuntimeError:
+        worker._handle_failure(group["id"], group["analysis_attempts"], "api down")
+
+    # Should be reset to pending
+    groups = db.list_frame_groups("s1")
+    assert groups[0]["analysis_status"] == "pending"
 
 
-def test_worker_fails_after_3_attempts(fresh_db_with_pending):
+def test_worker_fails_after_max_attempts(fresh_db_with_groups):
+    """After MAX_ANALYSIS_ATTEMPTS, group is marked failed."""
+    from server.analysis_pool import AnalysisWorker, MAX_ANALYSIS_ATTEMPTS
+    db = fresh_db_with_groups
+
+    stop_event = threading.Event()
+    worker = AnalysisWorker("sk-test", 0, stop_event, vision_client=FakeOpenAIClient())
+
+    # Simulate max attempts by failing repeatedly
+    for attempt in range(MAX_ANALYSIS_ATTEMPTS):
+        group = db.claim_next_pending_group()
+        if group is None:
+            break
+        worker._handle_failure(group["id"], group["analysis_attempts"], "persistent error")
+
+    groups = db.list_frame_groups("s1")
+    assert groups[0]["analysis_status"] == "failed"
+    assert "persistent error" in groups[0].get("analysis_error", "")
+
+
+def test_worker_handles_empty_steps(fresh_db_with_groups):
+    """LLM returning no parseable steps marks group as failed."""
     from server.analysis_pool import AnalysisWorker
-    db = fresh_db_with_pending
-    fake_client = FakeVisionClient()
-    fake_client.set_raise(RuntimeError("persistent error"))
+    db = fresh_db_with_groups
+
+    fake_client = FakeOpenAIClient()
+    # Return empty steps
+    resp = MagicMock()
+    resp.choices = [MagicMock()]
+    resp.choices[0].message.content = "I don't understand the images"
+    fake_client._response = resp
 
     stop_event = threading.Event()
     worker = AnalysisWorker("sk-test", 0, stop_event, vision_client=fake_client)
 
-    # Claim three times, fail three times
-    frame_id = None
-    for attempt in range(3):
-        frame = db.claim_next_pending_frame()
-        assert frame is not None, f"attempt {attempt}: expected a claimable frame"
-        if frame_id is None:
-            frame_id = frame["id"]
-        worker._analyze_one(frame)
+    group = db.claim_next_pending_group()
+    worker._analyze_group(fake_client, group)
 
-    final = db.get_frame(frame_id)
-    assert final["analysis_status"] == "failed"
-    assert final["analysis_attempts"] == 3
-    assert "persistent error" in final["analysis_error"]
+    groups = db.list_frame_groups("s1")
+    assert groups[0]["analysis_status"] == "failed"
+    assert "empty steps" in groups[0].get("analysis_error", "")
 
 
-def test_worker_handles_empty_result_as_failure(fresh_db_with_pending):
-    """VisionClient returning None (empty response) should count as a failure."""
+def test_worker_run_loop_drains_queue(fresh_db_with_groups):
+    """Worker's main loop processes all pending groups then waits."""
     from server.analysis_pool import AnalysisWorker
-    db = fresh_db_with_pending
-    fake_client = FakeVisionClient()
-    fake_client.set_result(None)  # qwen returned nothing parseable
+    db = fresh_db_with_groups
 
-    stop_event = threading.Event()
-    worker = AnalysisWorker("sk-test", 0, stop_event, vision_client=fake_client)
-
-    frame = db.claim_next_pending_frame()
-    worker._analyze_one(frame)
-    refreshed = db.get_frame(frame["id"])
-    assert refreshed["analysis_status"] == "pending"  # will retry
-    assert refreshed["analysis_attempts"] == 1
-
-
-def test_worker_run_loop_drains_queue_then_waits(fresh_db_with_pending):
-    """Worker's main run loop: process all pending, then wait on stop_event."""
-    from server.analysis_pool import AnalysisWorker
-    db = fresh_db_with_pending
-    fake_client = FakeVisionClient()
-    fake_client.set_result(_fake_analysis(frame_index=0))
-
+    fake_client = FakeOpenAIClient()
     stop_event = threading.Event()
     worker = AnalysisWorker("sk-test", 0, stop_event, vision_client=fake_client)
 
     t = threading.Thread(target=worker.run, daemon=True)
     t.start()
 
-    # Poll until all three pending are done, max 3 seconds
-    deadline = time.time() + 3.0
+    # Wait until the group is done
+    deadline = time.time() + 5.0
     while time.time() < deadline:
-        stats = db.get_analysis_queue_stats()
-        if stats["done"] == 3:
+        groups = db.list_frame_groups("s1")
+        if groups and groups[0]["analysis_status"] == "done":
             break
         time.sleep(0.05)
 
     stop_event.set()
     t.join(timeout=5.0)
 
-    final = db.get_analysis_queue_stats()
-    assert final["done"] == 3
-    assert final["pending"] == 0
+    groups = db.list_frame_groups("s1")
+    assert groups[0]["analysis_status"] == "done"
 
 
 # ---------------------------------------------------------------------------
@@ -204,16 +225,12 @@ def test_worker_run_loop_drains_queue_then_waits(fresh_db_with_pending):
 # ---------------------------------------------------------------------------
 
 
-def test_pool_starts_one_thread_per_key(fresh_db_with_pending):
+def test_pool_starts_one_thread_per_key(fresh_db_with_groups):
     """N keys -> N threads, all alive until stop()."""
     from server.analysis_pool import AnalysisPool, AnalysisWorker
-    # Use a factory that returns FakeVisionClient so no real API calls happen
-    fake_clients = []
 
     def worker_factory(key, key_index, stop_event):
-        fc = FakeVisionClient()
-        fc.set_result(_fake_analysis(frame_index=0))
-        fake_clients.append(fc)
+        fc = FakeOpenAIClient()
         return AnalysisWorker(key, key_index, stop_event, vision_client=fc)
 
     pool = AnalysisPool(keys=["sk-a", "sk-b", "sk-c"], worker_factory=worker_factory)
@@ -225,39 +242,39 @@ def test_pool_starts_one_thread_per_key(fresh_db_with_pending):
     finally:
         pool.stop(timeout=5.0)
 
-    # After stop, all threads should be joined
+    # After stop, threads should be joined (may already be dead as daemon)
     for t in pool._threads:
         assert not t.is_alive()
 
 
-def test_pool_drains_queue_with_multiple_workers(fresh_db_with_pending):
-    """3 workers + 3 pending frames -> all become 'done'."""
+def test_pool_drains_queue_with_multiple_workers(fresh_db_with_groups):
+    """Workers + pending group -> group becomes 'done'."""
     from server.analysis_pool import AnalysisPool, AnalysisWorker
-    db = fresh_db_with_pending
+    db = fresh_db_with_groups
 
     def worker_factory(key, key_index, stop_event):
-        fc = FakeVisionClient()
-        fc.set_result(_fake_analysis(frame_index=0))
+        fc = FakeOpenAIClient()
         return AnalysisWorker(key, key_index, stop_event, vision_client=fc)
 
-    pool = AnalysisPool(keys=["sk-a", "sk-b", "sk-c"], worker_factory=worker_factory)
+    pool = AnalysisPool(keys=["sk-a", "sk-b"], worker_factory=worker_factory)
     pool.start()
 
-    # Wait up to 3s for drain
-    deadline = time.time() + 3.0
+    deadline = time.time() + 5.0
     while time.time() < deadline:
-        if db.get_analysis_queue_stats()["done"] == 3:
+        groups = db.list_frame_groups("s1")
+        if groups and groups[0]["analysis_status"] == "done":
             break
         time.sleep(0.05)
 
     pool.stop(timeout=5.0)
-    assert db.get_analysis_queue_stats()["done"] == 3
+    groups = db.list_frame_groups("s1")
+    assert groups[0]["analysis_status"] == "done"
 
 
 def test_pool_with_empty_keys_is_noop():
     """No keys -> pool does nothing, stop is safe."""
     from server.analysis_pool import AnalysisPool
     pool = AnalysisPool(keys=[])
-    pool.start()  # no-op
+    pool.start()
     assert pool._threads == []
-    pool.stop()  # no-op
+    pool.stop()

@@ -205,7 +205,8 @@ def test_queue_stats_endpoint(client):
                    headers={"Authorization": f"Bearer {admin_token}"})
     assert r.status_code == 200
     body = r.json()
-    assert body["pending"] == 2
+    assert body["uploaded"] == 2
+    assert body["pending"] == 0
     assert body["running"] == 0
     assert body["done"] == 0
     assert body["failed"] == 0
@@ -237,3 +238,59 @@ def test_old_post_frames_batch_returns_404(client):
         json=[],
     )
     assert r.status_code in (404, 405), f"Expected 404/405, got {r.status_code}"
+
+
+@pytest.fixture
+def client_and_db(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKFLOW_SERVER_DB", str(tmp_path / "test.db"))
+    monkeypatch.setenv("WORKFLOW_IMAGE_DIR", str(tmp_path / "frame_images"))
+    monkeypatch.setenv("WORKFLOW_SERVER_KEY", "")  # no key required
+    monkeypatch.setenv("DASHBOARD_SECRET_KEY", "test-secret")
+    monkeypatch.setenv("WORKFLOW_DISABLE_ANALYSIS_POOL", "1")
+    from server.app import app
+    from server import db
+    db.init_db()
+    return TestClient(app), str(tmp_path / "test.db")
+
+
+def test_upload_creates_session_record(client_and_db):
+    """Upload should upsert a sessions row with status='active'."""
+    client, db_path = client_and_db
+    import io
+    resp = client.post(
+        "/frames/upload",
+        data={
+            "employee_id": "E001",
+            "session_id": "sess-abc",
+            "frame_index": "0",
+            "timestamp": "1700000000.0",
+        },
+        files={"image": ("test.png", io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100), "image/png")},
+    )
+    assert resp.status_code == 200
+    from server import db
+    sess = db.get_session("sess-abc")
+    assert sess is not None
+    assert sess["status"] == "active"
+    assert sess["frame_count"] == 1
+
+
+def test_upload_sets_status_uploaded(client_and_db):
+    """New frames should have analysis_status='uploaded', not 'pending'."""
+    client, db_path = client_and_db
+    import io
+    resp = client.post(
+        "/frames/upload",
+        data={
+            "employee_id": "E001",
+            "session_id": "sess-abc",
+            "frame_index": "0",
+            "timestamp": "1700000000.0",
+        },
+        files={"image": ("test.png", io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100), "image/png")},
+    )
+    assert resp.status_code == 200
+    frame_id = resp.json()["id"]
+    from server import db
+    frame = db.get_frame(frame_id)
+    assert frame["analysis_status"] == "uploaded"

@@ -45,9 +45,9 @@ def test_upload_and_query_lifecycle(tmp_path, monkeypatch):
     assert up.status_code == 200
     frame_id = up.json()["id"]
 
-    # 2. DB has the pending row with the OS coords
+    # 2. DB has the uploaded row with the OS coords
     frame = db.get_frame(frame_id)
-    assert frame["analysis_status"] == "pending"
+    assert frame["analysis_status"] == "uploaded"
     assert frame["cursor_x"] == 123
     assert frame["cursor_y"] == 456
     assert frame["focus_rect"] == [10, 20, 100, 200]
@@ -57,7 +57,7 @@ def test_upload_and_query_lifecycle(tmp_path, monkeypatch):
                        json={"username": "admin", "password": "p"}).json()["access_token"]
     stats = client.get("/api/frames/queue",
                       headers={"Authorization": f"Bearer {token}"}).json()
-    assert stats["pending"] == 1
+    assert stats["uploaded"] == 1
 
     # 4. Image retrieval
     img_resp = client.get(f"/api/frames/{frame_id}/image",

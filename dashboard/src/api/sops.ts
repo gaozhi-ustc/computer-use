@@ -4,7 +4,7 @@ export interface SopInfo {
   id: number
   title: string
   description: string
-  status: 'draft' | 'in_review' | 'published'
+  status: 'draft' | 'in_review' | 'published' | 'regenerating'
   created_by: string
   assigned_reviewer: string | null
   source_session_id: string | null
@@ -30,10 +30,40 @@ export interface StepInfo {
   confidence: number
   created_at: string
   updated_at: string
+  human_description?: string
+  machine_actions?: Array<{
+    type: string
+    x?: number
+    y?: number
+    target?: string
+    text?: string
+    key?: string
+  }>
+  revision?: number
 }
 
 export interface SopDetail extends SopInfo {
   steps: StepInfo[]
+}
+
+export interface SopFeedbackResponse {
+  feedback_id: number
+  new_revision: number
+  status: string
+}
+
+export interface SopStatusResponse {
+  status: string
+  revision: number
+}
+
+export interface SopRevision {
+  id: number
+  sop_id: number
+  revision: number
+  steps_snapshot_json: string
+  feedback_id: number | null
+  created_at: string
 }
 
 export interface SopListResponse {
@@ -82,4 +112,19 @@ export const sopsApi = {
 
   reorderSteps: (sopId: number, stepIds: number[]) =>
     client.put(`/api/sops/${sopId}/steps/reorder`, { step_ids: stepIds }),
+
+  getStatus: (sopId: number) =>
+    client.get<SopStatusResponse>(`/api/sops/${sopId}/status`),
+
+  submitFeedback: (sopId: number, body: { feedback_text: string; scope: string }) =>
+    client.post<SopFeedbackResponse>(`/api/sops/${sopId}/feedback`, body),
+
+  listRevisions: (sopId: number) =>
+    client.get<SopRevision[]>(`/api/sops/${sopId}/revisions`),
+
+  getRevision: (sopId: number, rev: number) =>
+    client.get<SopRevision>(`/api/sops/${sopId}/revisions/${rev}`),
+
+  restoreRevision: (sopId: number, rev: number) =>
+    client.post<{ ok: boolean; revision: number }>(`/api/sops/${sopId}/revisions/${rev}/restore`),
 }

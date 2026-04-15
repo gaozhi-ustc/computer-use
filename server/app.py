@@ -27,6 +27,7 @@ from server import db
 from server.auth_router import router as auth_router
 from server.frames_router import router as frames_router
 from server.sessions_router import router as sessions_router
+from server.sop_feedback_router import router as sop_feedback_router
 from server.sops_router import router as sops_router
 from server.stats_router import router as stats_router
 from server.users_router import router as users_router
@@ -95,6 +96,7 @@ app = FastAPI(
 app.include_router(auth_router)
 app.include_router(frames_router)
 app.include_router(sessions_router)
+app.include_router(sop_feedback_router)
 app.include_router(sops_router)
 app.include_router(stats_router)
 app.include_router(users_router)
@@ -103,6 +105,7 @@ app.include_router(users_router)
 # AnalysisPool is assigned during startup, so tests that don't want workers
 # can monkeypatch WORKFLOW_DISABLE_ANALYSIS_POOL to any non-empty value.
 _analysis_pool = None
+_session_finalizer_thread = None
 
 
 @app.on_event("startup")
@@ -128,13 +131,28 @@ def _startup() -> None:
     _analysis_pool = AnalysisPool(keys=keys)
     _analysis_pool.start()
 
+    # Start the session finalizer daemon thread (shares stop event with pool).
+    if not os.environ.get("WORKFLOW_DISABLE_SESSION_FINALIZER"):
+        global _session_finalizer_thread
+        import threading
+        from server.session_finalizer import SessionFinalizer
+        stop_event = _analysis_pool._stop_event
+        finalizer = SessionFinalizer(stop_event=stop_event)
+        _session_finalizer_thread = threading.Thread(
+            target=finalizer.run, daemon=True, name="session-finalizer",
+        )
+        _session_finalizer_thread.start()
+
 
 @app.on_event("shutdown")
 def _shutdown() -> None:
-    global _analysis_pool
+    global _analysis_pool, _session_finalizer_thread
     if _analysis_pool is not None:
         _analysis_pool.stop(timeout=30.0)
         _analysis_pool = None
+    if _session_finalizer_thread is not None:
+        _session_finalizer_thread.join(timeout=5.0)
+        _session_finalizer_thread = None
 
 
 @app.get("/health")
@@ -175,4 +193,22 @@ def list_frames(
 _dashboard_dist = Path(__file__).resolve().parent.parent / "dashboard" / "dist"
 if _dashboard_dist.is_dir():
     from starlette.staticfiles import StaticFiles
+    from starlette.responses import FileResponse as _FileResponse
+
+    _index_html = _dashboard_dist / "index.html"
+
+    # SPA fallback: serve index.html for any non-API, non-file route
+    @app.middleware("http")
+    async def _spa_fallback(request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if (
+            response.status_code == 404
+            and not path.startswith(("/api/", "/frames", "/health", "/docs", "/openapi"))
+            and "." not in path.split("/")[-1]
+            and _index_html.is_file()
+        ):
+            return _FileResponse(str(_index_html), media_type="text/html")
+        return response
+
     app.mount("/", StaticFiles(directory=str(_dashboard_dist), html=True), name="dashboard")

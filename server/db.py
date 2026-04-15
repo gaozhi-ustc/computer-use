@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS sops (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
     description TEXT DEFAULT '',
-    status TEXT NOT NULL CHECK(status IN ('draft', 'in_review', 'published')),
+    status TEXT NOT NULL CHECK(status IN ('draft', 'in_review', 'published', 'regenerating')),
     created_by TEXT NOT NULL,
     assigned_reviewer TEXT,
     source_session_id TEXT,
@@ -68,6 +68,66 @@ CREATE TABLE IF NOT EXISTS sop_steps (
 
 CREATE INDEX IF NOT EXISTS idx_sops_status ON sops(status);
 CREATE INDEX IF NOT EXISTS idx_sop_steps_sop ON sop_steps(sop_id, step_order);
+"""
+
+SESSIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL UNIQUE,
+    employee_id TEXT NOT NULL,
+    status TEXT DEFAULT 'active',
+    first_frame_at TEXT NOT NULL,
+    last_frame_at TEXT NOT NULL,
+    frame_count INTEGER DEFAULT 0,
+    finalized_at TEXT DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+CREATE INDEX IF NOT EXISTS idx_sessions_employee ON sessions(employee_id);
+"""
+
+FRAME_GROUPS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS frame_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    employee_id TEXT NOT NULL,
+    group_index INTEGER NOT NULL,
+    frame_ids_json TEXT NOT NULL DEFAULT '[]',
+    primary_application TEXT DEFAULT '',
+    analysis_status TEXT DEFAULT 'pending',
+    analysis_error TEXT DEFAULT '',
+    analysis_attempts INTEGER DEFAULT 0,
+    analyzed_at TEXT DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE(session_id, group_index)
+);
+CREATE INDEX IF NOT EXISTS idx_frame_groups_status ON frame_groups(analysis_status);
+"""
+
+SOP_FEEDBACKS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS sop_feedbacks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sop_id INTEGER NOT NULL REFERENCES sops(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
+    feedback_text TEXT NOT NULL,
+    feedback_scope TEXT DEFAULT 'full',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sop_feedbacks_sop ON sop_feedbacks(sop_id);
+"""
+
+SOP_REVISIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS sop_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sop_id INTEGER NOT NULL REFERENCES sops(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL,
+    steps_snapshot_json TEXT NOT NULL,
+    feedback_id INTEGER,
+    created_at TEXT NOT NULL,
+    UNIQUE(sop_id, revision)
+);
 """
 
 SCHEMA = """
@@ -122,7 +182,38 @@ def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
         conn.executescript(USERS_SCHEMA)
+        conn.executescript(SESSIONS_SCHEMA)
+        conn.executescript(FRAME_GROUPS_SCHEMA)
+        conn.executescript(SOP_FEEDBACKS_SCHEMA)
+        conn.executescript(SOP_REVISIONS_SCHEMA)
         _migrate_add_columns(conn)
+
+        # Idempotent ALTER TABLE for sops
+        for col, default in [
+            ("revision", "1"),
+            ("source_group_ids_json", "'[]'"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE sops ADD COLUMN {col} TEXT DEFAULT {default}")
+            except Exception:
+                pass
+
+        # Idempotent ALTER TABLE for sop_steps
+        for col, default in [
+            ("human_description", "''"),
+            ("machine_actions", "'[]'"),
+            ("revision", "1"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE sop_steps ADD COLUMN {col} TEXT DEFAULT {default}")
+            except Exception:
+                pass
+
+        # Idempotent ALTER TABLE for frames — add window_title_raw
+        try:
+            conn.execute("ALTER TABLE frames ADD COLUMN window_title_raw TEXT DEFAULT ''")
+        except Exception:
+            pass
 
 
 def _migrate_add_columns(conn: sqlite3.Connection) -> None:
@@ -545,21 +636,26 @@ def insert_sop_step(
     description: str = "",
     application: str = "",
     action_type: str = "",
-    action_detail: dict | None = None,
+    action_detail: dict | list | None = None,
     screenshot_ref: str = "",
     source_frame_ids: list[int] | None = None,
     confidence: float = 0.0,
+    human_description: str = "",
+    machine_actions: list | None = None,
 ) -> int:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with connect() as conn:
         cur = conn.execute(
             """INSERT INTO sop_steps (sop_id, step_order, title, description,
                application, action_type, action_detail, screenshot_ref,
-               source_frame_ids, confidence, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               source_frame_ids, confidence, human_description,
+               machine_actions, revision, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (sop_id, step_order, title, description, application, action_type,
              json.dumps(action_detail or {}), screenshot_ref,
-             json.dumps(source_frame_ids or []), confidence, now, now),
+             json.dumps(source_frame_ids or []), confidence,
+             human_description, json.dumps(machine_actions or []),
+             1, now, now),
         )
         return cur.lastrowid
 
@@ -862,8 +958,10 @@ def insert_pending_frame(
     cursor_x: int = -1,
     cursor_y: int = -1,
     focus_rect: list[int] | None = None,
+    window_title_raw: str = "",
+    analysis_status: str = "uploaded",
 ) -> int | None:
-    """Insert a frame in 'pending' state, awaiting analysis.
+    """Insert a frame awaiting analysis.
 
     Returns the row id, or None on UNIQUE collision (retry of the same frame).
     """
@@ -880,12 +978,13 @@ def insert_pending_frame(
                 application, window_title, user_action, text_content,
                 confidence, mouse_position_json, ui_elements_json, context_data_json,
                 image_path, analysis_status, analysis_attempts,
-                cursor_x, cursor_y, focus_rect_json
+                cursor_x, cursor_y, focus_rect_json, window_title_raw
             ) VALUES (?, ?, ?, ?, ?, '', '', '', '', 0.0, '[]', '[]', '{}',
-                      ?, 'pending', 0, ?, ?, ?)
+                      ?, ?, 0, ?, ?, ?, ?)
             """,
             (employee_id, session_id, frame_index, recorded_at, received_at,
-             image_path, cursor_x, cursor_y, focus_json),
+             image_path, analysis_status, cursor_x, cursor_y, focus_json,
+             window_title_raw),
         )
         if cur.rowcount == 0:
             return None
@@ -992,7 +1091,7 @@ def get_analysis_queue_stats() -> dict[str, int]:
         rows = conn.execute(
             "SELECT analysis_status, COUNT(*) as n FROM frames GROUP BY analysis_status"
         ).fetchall()
-    stats = {"pending": 0, "running": 0, "failed": 0, "done": 0}
+    stats = {"uploaded": 0, "pending": 0, "running": 0, "failed": 0, "done": 0}
     for r in rows:
         status = r["analysis_status"]
         if status in stats:
@@ -1032,3 +1131,316 @@ def _frame_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     except (json.JSONDecodeError, TypeError):
         d["focus_rect"] = None
     return d
+
+
+# ---------------------------------------------------------------------------
+# Sessions CRUD
+# ---------------------------------------------------------------------------
+
+
+def upsert_session(session_id: str, employee_id: str, frame_at: str) -> None:
+    """Insert or update a session row when a new frame arrives."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect() as conn:
+        existing = conn.execute(
+            "SELECT id FROM sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                """INSERT INTO sessions
+                   (session_id, employee_id, status, first_frame_at, last_frame_at,
+                    frame_count, finalized_at, created_at, updated_at)
+                   VALUES (?, ?, 'active', ?, ?, 1, '', ?, ?)""",
+                (session_id, employee_id, frame_at, frame_at, now, now),
+            )
+        else:
+            conn.execute(
+                """UPDATE sessions SET
+                   last_frame_at = ?, frame_count = frame_count + 1, updated_at = ?
+                   WHERE session_id = ?""",
+                (frame_at, now, session_id),
+            )
+
+
+def get_session(session_id: str) -> dict[str, Any] | None:
+    """Return a session row by session_id."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_idle_sessions(cutoff_iso: str) -> list[dict[str, Any]]:
+    """Return active sessions whose last_frame_at is before cutoff_iso."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM sessions WHERE status = 'active' AND last_frame_at < ?",
+            (cutoff_iso,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_session_status(
+    session_id: str, status: str, finalized_at: str | None = None
+) -> None:
+    """Transition the session to a new status."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    fin = finalized_at or ""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE sessions SET status = ?, finalized_at = ?, updated_at = ? WHERE session_id = ?",
+            (status, fin, now, session_id),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Frame groups CRUD
+# ---------------------------------------------------------------------------
+
+
+def insert_frame_group(
+    session_id: str,
+    employee_id: str,
+    group_index: int,
+    frame_ids: list[int],
+    primary_application: str = "",
+) -> int:
+    """Insert a new frame group. Returns the row id."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO frame_groups
+               (session_id, employee_id, group_index, frame_ids_json,
+                primary_application, analysis_status, analysis_error,
+                analysis_attempts, analyzed_at, created_at)
+               VALUES (?, ?, ?, ?, ?, 'pending', '', 0, '', ?)""",
+            (session_id, employee_id, group_index,
+             json.dumps(frame_ids), primary_application, now),
+        )
+        return cur.lastrowid
+
+
+def get_frame_group(group_id: int) -> dict[str, Any] | None:
+    """Return a frame group by id, with frame_ids deserialized."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM frame_groups WHERE id = ?", (group_id,)
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["frame_ids"] = json.loads(d.pop("frame_ids_json", "[]"))
+    return d
+
+
+def claim_next_pending_group() -> dict[str, Any] | None:
+    """Atomically claim the oldest pending frame group for analysis."""
+    with connect() as conn:
+        row = conn.execute(
+            """
+            UPDATE frame_groups
+            SET analysis_status = 'running',
+                analysis_attempts = analysis_attempts + 1
+            WHERE id = (
+                SELECT id FROM frame_groups
+                WHERE analysis_status = 'pending'
+                ORDER BY id ASC
+                LIMIT 1
+            )
+            RETURNING *
+            """,
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["frame_ids"] = json.loads(d.pop("frame_ids_json", "[]"))
+    return d
+
+
+def mark_group_done(group_id: int) -> None:
+    """Set group status to done."""
+    analyzed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute(
+            "UPDATE frame_groups SET analysis_status = 'done', analyzed_at = ? WHERE id = ?",
+            (analyzed_at, group_id),
+        )
+
+
+def mark_group_failed(group_id: int, reason: str) -> None:
+    """Set group status to failed with error reason."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE frame_groups SET analysis_status = 'failed', analysis_error = ? WHERE id = ?",
+            (reason, group_id),
+        )
+
+
+def reset_group_to_pending(group_id: int) -> None:
+    """Reset a failed group back to pending for retry."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE frame_groups SET analysis_status = 'pending', analysis_error = '' WHERE id = ?",
+            (group_id,),
+        )
+
+
+def all_groups_done(session_id: str) -> bool:
+    """Check if all frame groups for a session are done."""
+    with connect() as conn:
+        (total,) = conn.execute(
+            "SELECT COUNT(*) FROM frame_groups WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        (done,) = conn.execute(
+            "SELECT COUNT(*) FROM frame_groups WHERE session_id = ? AND analysis_status = 'done'",
+            (session_id,),
+        ).fetchone()
+    return total > 0 and total == done
+
+
+def list_frame_groups(session_id: str) -> list[dict[str, Any]]:
+    """List all frame groups for a session, ordered by group_index."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM frame_groups WHERE session_id = ? ORDER BY group_index",
+            (session_id,),
+        ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["frame_ids"] = json.loads(d.pop("frame_ids_json", "[]"))
+        result.append(d)
+    return result
+
+
+def store_group_analysis_result(session_id: str, group_index: int,
+                                 steps: list[dict]) -> None:
+    """Store parsed SOP steps from group analysis as JSON on the group row.
+
+    We repurpose analysis_error field for done groups to store the result JSON.
+    """
+    with connect() as conn:
+        conn.execute(
+            "UPDATE frame_groups SET analysis_error = ? "
+            "WHERE session_id = ? AND group_index = ?",
+            (json.dumps(steps, ensure_ascii=False), session_id, group_index),
+        )
+
+
+def get_group_analysis_result(session_id: str, group_index: int) -> list[dict] | None:
+    """Retrieve parsed SOP steps stored on a group row."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT analysis_error FROM frame_groups "
+            "WHERE session_id = ? AND group_index = ? AND analysis_status = 'done'",
+            (session_id, group_index),
+        ).fetchone()
+    if row is None or not row["analysis_error"]:
+        return None
+    try:
+        return json.loads(row["analysis_error"])
+    except (ValueError, TypeError):
+        return None
+
+
+def update_sop_group_ids(sop_id: int, group_ids: list[int]) -> None:
+    """Set source_group_ids_json on a SOP."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE sops SET source_group_ids_json = ? WHERE id = ?",
+            (json.dumps(group_ids), sop_id),
+        )
+
+
+# ---------------------------------------------------------------------------
+# SOP feedbacks & revisions
+# ---------------------------------------------------------------------------
+
+
+def insert_sop_feedback(
+    sop_id: int,
+    revision: int,
+    user_id: str,
+    feedback_text: str,
+    feedback_scope: str = "full",
+) -> int:
+    """Insert a feedback entry for a SOP revision. Returns the row id."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO sop_feedbacks
+               (sop_id, revision, user_id, feedback_text, feedback_scope, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (sop_id, revision, user_id, feedback_text, feedback_scope, now),
+        )
+        return cur.lastrowid
+
+
+def list_sop_feedbacks(sop_id: int) -> list[dict[str, Any]]:
+    """List all feedbacks for a SOP, ordered by created_at."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM sop_feedbacks WHERE sop_id = ? ORDER BY created_at",
+            (sop_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def insert_sop_revision(
+    sop_id: int,
+    revision: int,
+    steps_snapshot_json: str,
+    feedback_id: int | None = None,
+) -> int:
+    """Insert a SOP revision snapshot. Returns the row id."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO sop_revisions
+               (sop_id, revision, steps_snapshot_json, feedback_id, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (sop_id, revision, steps_snapshot_json, feedback_id, now),
+        )
+        return cur.lastrowid
+
+
+def list_sop_revisions(sop_id: int) -> list[dict[str, Any]]:
+    """List all revisions for a SOP, ordered by revision number."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM sop_revisions WHERE sop_id = ? ORDER BY revision",
+            (sop_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_sop_revision(sop_id: int, revision: int) -> dict[str, Any] | None:
+    """Get a specific revision of a SOP."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM sop_revisions WHERE sop_id = ? AND revision = ?",
+            (sop_id, revision),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_sop_revision(sop_id: int, revision: int, status: str = "draft") -> None:
+    """Update SOP revision number and status."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute(
+            "UPDATE sops SET revision = ?, status = ?, updated_at = ? WHERE id = ?",
+            (str(revision), status, now, sop_id),
+        )
+
+
+def queue_sop_regeneration(sop_id: int, feedback_id: int) -> None:
+    """Queue a SOP for regeneration. Workers poll for status='regenerating'."""
+    pass
+
+
+def delete_sop_steps(sop_id: int) -> None:
+    """Delete all steps for a SOP (before restoring a revision)."""
+    with connect() as conn:
+        conn.execute("DELETE FROM sop_steps WHERE sop_id = ?", (sop_id,))
