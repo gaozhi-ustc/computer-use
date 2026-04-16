@@ -48,6 +48,8 @@ export interface FrameInfo {
     title: string
     application: string
   }>
+  // v0.5.2 server-side pre-analysis filter
+  skip_reason?: '' | 'near_duplicate' | 'low_signal' | string
 }
 
 export interface SessionDetail {

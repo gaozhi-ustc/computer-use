@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
+import type { ScrollbarInst } from 'naive-ui'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { sessionsApi, type SessionInfo, type SessionDetail, type FrameInfo, type AnalysisStatus } from '@/api/sessions'
@@ -9,8 +10,26 @@ import {
   NCard, NSpace, NInput, NDatePicker, NTag, NBadge, NEmpty,
   NSpin, NTimeline, NTimelineItem, NGrid, NGi,
   NScrollbar, NDescriptions, NDescriptionsItem,
-  NButton, NModal, useMessage
+  NButton, NModal, NRadioGroup, NRadioButton, useMessage
 } from 'naive-ui'
+
+type SkipFilter = 'all' | 'kept' | 'skipped'
+
+function skipReasonLabel(reason?: string): string {
+  switch (reason) {
+    case 'near_duplicate': return '近重复'
+    case 'low_signal': return '空画面/加载中'
+    default: return ''
+  }
+}
+
+function skipReasonColor(reason?: string): 'default' | 'warning' | 'error' {
+  switch (reason) {
+    case 'near_duplicate': return 'warning'
+    case 'low_signal': return 'error'
+    default: return 'default'
+  }
+}
 
 const modalFrame = ref<FrameInfo | null>(null)
 function openFrameModal(frame: FrameInfo) {
@@ -52,14 +71,65 @@ const generatingSop = ref(false)
 const analyzingSession = ref(false)
 
 const FRAMES_PAGE_SIZE = 100
-const framesPage = ref(1)
-const pagedFrames = computed(() => {
-  if (!selectedSession.value) return []
-  const end = framesPage.value * FRAMES_PAGE_SIZE
-  return selectedSession.value.frames.slice(0, end)
+const skipFilter = ref<SkipFilter>('all')
+
+// Per-filter scroll state: toggling filter tabs restores the last scroll
+// position and paging for that tab instead of snapping back to the top.
+type FilterScrollState = { top: number; page: number }
+const scrollStateByFilter = reactive<Record<SkipFilter, FilterScrollState>>({
+  all: { top: 0, page: 1 },
+  kept: { top: 0, page: 1 },
+  skipped: { top: 0, page: 1 },
 })
-const totalFrames = computed(() => selectedSession.value?.frames.length || 0)
+const framesPage = computed<number>({
+  get: () => scrollStateByFilter[skipFilter.value].page,
+  set: (v: number) => { scrollStateByFilter[skipFilter.value].page = v },
+})
+const framesScrollbar = ref<ScrollbarInst | null>(null)
+
+function onFramesScroll(e: Event) {
+  const target = e.target as HTMLElement | null
+  if (!target) return
+  scrollStateByFilter[skipFilter.value].top = target.scrollTop
+}
+
+function resetScrollState() {
+  scrollStateByFilter.all = { top: 0, page: 1 }
+  scrollStateByFilter.kept = { top: 0, page: 1 }
+  scrollStateByFilter.skipped = { top: 0, page: 1 }
+}
+
+const skipCounts = computed(() => {
+  const c = { kept: 0, near_duplicate: 0, low_signal: 0 }
+  if (!selectedSession.value) return c
+  for (const f of selectedSession.value.frames) {
+    if (!f.skip_reason) c.kept++
+    else if (f.skip_reason === 'near_duplicate') c.near_duplicate++
+    else if (f.skip_reason === 'low_signal') c.low_signal++
+  }
+  return c
+})
+
+const filteredFrames = computed(() => {
+  const all = selectedSession.value?.frames || []
+  if (skipFilter.value === 'kept') return all.filter(f => !f.skip_reason)
+  if (skipFilter.value === 'skipped') return all.filter(f => !!f.skip_reason)
+  return all
+})
+
+const pagedFrames = computed(() => {
+  const end = framesPage.value * FRAMES_PAGE_SIZE
+  return filteredFrames.value.slice(0, end)
+})
+const totalFrames = computed(() => filteredFrames.value.length)
 const hasMoreFrames = computed(() => pagedFrames.value.length < totalFrames.value)
+
+watch(skipFilter, async (newF) => {
+  // Wait for DOM to render the target filter's pagedFrames, then restore
+  // the scrollTop that was recorded the last time user was on this tab.
+  await nextTick()
+  framesScrollbar.value?.scrollTo({ top: scrollStateByFilter[newF].top })
+})
 
 async function generateSop() {
   if (!selectedSession.value) return
@@ -117,7 +187,8 @@ async function fetchSessions() {
 async function selectSession(session: SessionInfo) {
   selectedSessionId.value = session.session_id
   detailLoading.value = true
-  framesPage.value = 1
+  resetScrollState()
+  skipFilter.value = 'all'
   try {
     const { data } = await sessionsApi.detail(session.session_id)
     selectedSession.value = data
@@ -269,9 +340,21 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
                 <NDescriptionsItem label="帧数据">
                   {{ pagedFrames.length }} / {{ totalFrames }} 帧已显示
                 </NDescriptionsItem>
+                <NDescriptionsItem label="过滤状态" :span="2">
+                  <NSpace :size="8" align="center">
+                    <NTag size="small" type="success">保留 {{ skipCounts.kept }}</NTag>
+                    <NTag size="small" type="warning">近重复 {{ skipCounts.near_duplicate }}</NTag>
+                    <NTag size="small" type="error">空画面 {{ skipCounts.low_signal }}</NTag>
+                  </NSpace>
+                </NDescriptionsItem>
               </NDescriptions>
 
-              <NSpace style="margin-bottom: 16px">
+              <NSpace style="margin-bottom: 16px" align="center">
+                <NRadioGroup v-model:value="skipFilter" size="small">
+                  <NRadioButton value="all">全部</NRadioButton>
+                  <NRadioButton value="kept">仅保留</NRadioButton>
+                  <NRadioButton value="skipped">仅被过滤</NRadioButton>
+                </NRadioGroup>
                 <NButton
                   v-if="auth.isAdmin || auth.isManager"
                   type="primary"
@@ -289,7 +372,11 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
                 </NButton>
               </NSpace>
 
-              <NScrollbar style="max-height: calc(100vh - 360px)">
+              <NScrollbar
+                ref="framesScrollbar"
+                style="max-height: calc(100vh - 360px)"
+                @scroll="onFramesScroll"
+              >
                 <NEmpty
                   v-if="selectedSession.frames.length === 0"
                   description="该会话暂无帧数据"
@@ -299,10 +386,18 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
                     v-for="frame in pagedFrames"
                     :key="frame.id"
                     :time="formatDate(frame.recorded_at)"
+                    :type="frame.skip_reason ? 'warning' : 'default'"
                   >
                     <template #header>
                       <NSpace align="center" :size="8">
-                        <span>{{ frame.application || '未知应用' }}</span>
+                        <span>#{{ frame.frame_index }} · {{ frame.application || '未知应用' }}</span>
+                        <NTag
+                          v-if="frame.skip_reason"
+                          size="small"
+                          :type="skipReasonColor(frame.skip_reason)"
+                        >
+                          将跳过：{{ skipReasonLabel(frame.skip_reason) }}
+                        </NTag>
                         <NTag
                           v-if="frame.analysis_status && frame.analysis_status !== 'done'"
                           size="small"
@@ -312,7 +407,7 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
                         </NTag>
                       </NSpace>
                     </template>
-                    <div class="frame-row">
+                    <div class="frame-row" :class="{ 'frame-row-skipped': !!frame.skip_reason }">
                       <div class="frame-left">
                         <FrameImage
                           :frame="frame"
@@ -394,6 +489,11 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
           </div>
           <div style="flex: 1 1 auto; overflow-y: auto; max-height: 85vh;">
             <h3>Frame #{{ modalFrame.frame_index }}</h3>
+            <p v-if="modalFrame.skip_reason">
+              <NTag size="small" :type="skipReasonColor(modalFrame.skip_reason)">
+                将跳过：{{ skipReasonLabel(modalFrame.skip_reason) }}
+              </NTag>
+            </p>
             <p v-if="modalFrame.group_indices && modalFrame.group_indices.length > 0">
               所属分组: Group {{ modalFrame.group_indices.join(', Group ') }}
             </p>
@@ -499,5 +599,25 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
 .frame-right {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+.frame-row-skipped :deep(.frame-img-wrapper) {
+  opacity: 0.45;
+  filter: grayscale(60%);
+}
+
+.frame-row-skipped::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: #f0a020;
+  border-radius: 2px;
+}
+
+.frame-row {
+  position: relative;
 }
 </style>
