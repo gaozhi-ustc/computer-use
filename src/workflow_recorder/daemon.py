@@ -96,6 +96,8 @@ class Daemon:
             max_interval=idle_cfg.max_interval_seconds,
             idle_threshold_seconds=idle_cfg.idle_threshold_seconds,
             backoff_factor=idle_cfg.backoff_factor,
+            light_idle_threshold_seconds=idle_cfg.light_idle_threshold_seconds,
+            light_idle_interval_seconds=idle_cfg.light_idle_interval_seconds,
         ) if idle_cfg.enabled else None
 
         max_duration = self.config.session.max_duration_seconds
@@ -178,6 +180,30 @@ class Daemon:
             # loop continues — the mouse may now be moving
 
         return False
+
+    def _detect_input_since(self, prev_capture_time: float) -> bool:
+        """Return True iff any mouse/keyboard input happened between
+        prev_capture_time and now. Uses GetLastInputInfo via IdleDetector.
+
+        Rule: if seconds_since_last_input < time elapsed since prev capture,
+        the most recent input falls *inside* the window → input happened.
+
+        Special case: prev_capture_time == 0 (first capture ever) — we
+        have no prior window to compare against, so report False. This
+        also keeps non-Windows (where IdleDetector returns 0) safe: the
+        first frame is treated as "no input yet" instead of lying with
+        True.
+        """
+        if prev_capture_time <= 0.0 or self._idle_detector is None:
+            return False
+        try:
+            idle_secs = self._idle_detector.seconds_since_last_input()
+        except Exception:
+            return False
+        elapsed = time.monotonic() - prev_capture_time
+        # Strict <: idle exactly at the boundary doesn't count (same
+        # convention as the drop-duplicate check's strict >).
+        return idle_secs < elapsed
 
     def _should_drop_as_idle_duplicate(
         self, image_path: "Path", prev_capture_time: float
@@ -277,6 +303,11 @@ class Daemon:
                           frame_index=self.session.frames_captured + 1)
                 return
 
+            # Determine whether any mouse/keyboard input occurred between
+            # prev_capture_time and now. Same semantics as the drop-
+            # duplicate check: idle_secs < elapsed → input happened.
+            had_input = self._detect_input_since(prev_capture_time)
+
             self.session.frames_captured += 1
             if self.uploader is not None and self.config.server.enabled:
                 self.uploader.enqueue(
@@ -286,6 +317,7 @@ class Daemon:
                     cursor_x=result.cursor_x,
                     cursor_y=result.cursor_y,
                     focus_rect=result.focus_rect,
+                    had_input=had_input,
                 )
         except Exception as exc:
             log.exception("capture_failed", error=str(exc))

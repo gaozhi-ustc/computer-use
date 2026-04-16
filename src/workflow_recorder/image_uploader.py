@@ -107,8 +107,14 @@ class ImageUploader:
         cursor_x: int = -1,
         cursor_y: int = -1,
         focus_rect: list[int] | None = None,
+        had_input: bool = False,
     ) -> None:
-        """Queue one image for upload. Non-blocking; spills to buffer on full queue."""
+        """Queue one image for upload. Non-blocking; spills to buffer on full queue.
+
+        had_input: True iff any mouse/keyboard event happened between the
+        previous capture and this one. Stored server-side for downstream
+        "was the user actually interacting?" analytics.
+        """
         item = {
             "image_path": str(image_path),
             "frame_index": int(frame_index),
@@ -116,6 +122,7 @@ class ImageUploader:
             "cursor_x": int(cursor_x),
             "cursor_y": int(cursor_y),
             "focus_rect": focus_rect,
+            "had_input": bool(had_input),
         }
         if self._thread is None:
             # Not started — buffer for next start
@@ -187,6 +194,7 @@ class ImageUploader:
             "cursor_x": str(item.get("cursor_x", -1)),
             "cursor_y": str(item.get("cursor_y", -1)),
             "focus_rect": focus_str,
+            "had_input": "1" if item.get("had_input") else "0",
         }
         url = f"{self.server_url}/frames/upload"
         headers = {"X-API-Key": self.api_key} if self.api_key else {}

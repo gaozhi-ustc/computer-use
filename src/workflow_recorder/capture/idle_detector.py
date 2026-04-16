@@ -74,10 +74,17 @@ class IdleDetector:
 class IdleBackoff:
     """Computes the next capture interval based on idle state.
 
-    Strategy: stay at base_interval while user is active. Once idle
-    threshold is exceeded, double the interval on each subsequent capture
-    up to max_interval. Reset to base_interval as soon as input is
-    detected (current_idle_seconds drops below the threshold).
+    Three-tier strategy:
+      • Active (idle < light_idle_threshold):
+            current_interval = base_interval
+      • Light idle (light_idle_threshold ≤ idle < idle_threshold):
+            current_interval = max(base_interval, light_idle_interval)
+        — i.e. when base is already >= light_idle_interval this tier is a
+        no-op and we stay at base until deep idle. When base < light_idle
+        (e.g. 1s base), we bump to light_idle (3s) so we spend fewer shots
+        on short pauses between keystrokes.
+      • Deep idle (idle ≥ idle_threshold):
+            exponential × backoff_factor, capped at max_interval
     """
 
     def __init__(
@@ -86,6 +93,8 @@ class IdleBackoff:
         max_interval: float,
         idle_threshold_seconds: float,
         backoff_factor: float = 2.0,
+        light_idle_threshold_seconds: float | None = None,
+        light_idle_interval_seconds: float | None = None,
     ) -> None:
         if base_interval <= 0:
             raise ValueError("base_interval must be positive")
@@ -95,6 +104,10 @@ class IdleBackoff:
         self.max_interval = max_interval
         self.idle_threshold_seconds = idle_threshold_seconds
         self.backoff_factor = backoff_factor
+        # Light-idle tier is optional (default disabled for backward compat).
+        # When threshold is None, the tier collapses — old 2-tier behavior.
+        self.light_idle_threshold_seconds = light_idle_threshold_seconds
+        self.light_idle_interval_seconds = light_idle_interval_seconds
         self._current_interval = base_interval
 
     @property
@@ -104,11 +117,20 @@ class IdleBackoff:
     def update(self, seconds_since_last_input: float) -> float:
         """Recompute interval based on current idle state. Returns new interval."""
         if seconds_since_last_input >= self.idle_threshold_seconds:
-            # Idle — back off
+            # Deep idle — exponential backoff from the current interval
             self._current_interval = min(
                 self._current_interval * self.backoff_factor,
                 self.max_interval,
             )
+        elif (
+            self.light_idle_threshold_seconds is not None
+            and self.light_idle_interval_seconds is not None
+            and seconds_since_last_input >= self.light_idle_threshold_seconds
+        ):
+            # Light idle — use light interval, but never below base and
+            # never above max.
+            target = max(self.base_interval, self.light_idle_interval_seconds)
+            self._current_interval = min(target, self.max_interval)
         else:
             # Active — reset
             self._current_interval = self.base_interval

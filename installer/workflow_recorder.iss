@@ -1,5 +1,5 @@
 #define MyAppName "Workflow Recorder"
-#define MyAppVersion "0.4.8"
+#define MyAppVersion "0.4.9"
 #define MyAppPublisher "Workflow Recorder"
 #define MyAppExeName "workflow-recorder.exe"
 #define MyAppURL "https://github.com/gaozhi-ustc/computer-use"

@@ -251,6 +251,10 @@ def _migrate_add_columns(conn: sqlite3.Connection) -> None:
     # filter without re-uploading.
     if "skip_reason" not in cols:
         conn.execute("ALTER TABLE frames ADD COLUMN skip_reason TEXT DEFAULT ''")
+    # v0.4.9: client-reported "any mouse/keyboard input between prev capture
+    # and this one". 0 = no input (passive), 1 = input happened (interactive).
+    if "had_input" not in cols:
+        conn.execute("ALTER TABLE frames ADD COLUMN had_input INTEGER DEFAULT 0")
     # Index for AnalysisPool worker queue lookup
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_frames_status ON frames(analysis_status, id)"
@@ -408,7 +412,7 @@ def query_frames(
         "received_at, application, window_title, user_action, text_content, "
         "confidence, mouse_position_json, ui_elements_json, context_data_json, "
         "image_path, analysis_status, cursor_x, cursor_y, focus_rect_json, "
-        "skip_reason "
+        "skip_reason, had_input "
         f"FROM frames {where} "
         "ORDER BY recorded_at DESC, frame_index DESC "
         "LIMIT ? OFFSET ?"
@@ -972,6 +976,7 @@ def insert_pending_frame(
     focus_rect: list[int] | None = None,
     window_title_raw: str = "",
     analysis_status: str = "uploaded",
+    had_input: bool = False,
 ) -> int | None:
     """Insert a frame awaiting analysis.
 
@@ -990,13 +995,14 @@ def insert_pending_frame(
                 application, window_title, user_action, text_content,
                 confidence, mouse_position_json, ui_elements_json, context_data_json,
                 image_path, analysis_status, analysis_attempts,
-                cursor_x, cursor_y, focus_rect_json, window_title_raw
+                cursor_x, cursor_y, focus_rect_json, window_title_raw,
+                had_input
             ) VALUES (?, ?, ?, ?, ?, '', '', '', '', 0.0, '[]', '[]', '{}',
-                      ?, ?, 0, ?, ?, ?, ?)
+                      ?, ?, 0, ?, ?, ?, ?, ?)
             """,
             (employee_id, session_id, frame_index, recorded_at, received_at,
              image_path, analysis_status, cursor_x, cursor_y, focus_json,
-             window_title_raw),
+             window_title_raw, 1 if had_input else 0),
         )
         if cur.rowcount == 0:
             return None

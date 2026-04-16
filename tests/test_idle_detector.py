@@ -119,3 +119,92 @@ def test_backoff_max_equals_base_is_noop():
     b = IdleBackoff(base_interval=15, max_interval=15, idle_threshold_seconds=60)
     for _ in range(10):
         assert b.update(seconds_since_last_input=120.0) == 15.0
+
+
+# ---------------------------------------------------------------------------
+# Three-tier idle backoff (v0.4.9)
+# ---------------------------------------------------------------------------
+
+
+def test_light_idle_bumps_fast_base_to_light_interval():
+    """base=1s, light_threshold=3s, light_interval=3s: after 3s idle → 3s."""
+    b = IdleBackoff(
+        base_interval=1.0, max_interval=300,
+        idle_threshold_seconds=60,
+        light_idle_threshold_seconds=3.0,
+        light_idle_interval_seconds=3.0,
+    )
+    # Active
+    assert b.update(0.5) == 1.0
+    assert b.update(2.9) == 1.0
+    # Light-idle tier kicks in at 3s
+    assert b.update(3.0) == 3.0
+    assert b.update(10.0) == 3.0
+    assert b.update(59.9) == 3.0
+
+
+def test_light_idle_then_deep_idle_exponential():
+    """After 60s idle we leave light tier and start deep exponential backoff."""
+    b = IdleBackoff(
+        base_interval=1.0, max_interval=300,
+        idle_threshold_seconds=60, backoff_factor=2.0,
+        light_idle_threshold_seconds=3.0,
+        light_idle_interval_seconds=3.0,
+    )
+    b.update(10.0)  # light → 3.0
+    assert b.current_interval == 3.0
+    # Enter deep idle: 3 × 2 = 6, 6 × 2 = 12, ...
+    assert b.update(60.0) == 6.0
+    assert b.update(70.0) == 12.0
+    assert b.update(80.0) == 24.0
+
+
+def test_light_idle_no_op_when_base_already_at_light_interval():
+    """If base >= light_interval, light tier has no effect (nothing to bump to)."""
+    b = IdleBackoff(
+        base_interval=3.0, max_interval=300,
+        idle_threshold_seconds=60,
+        light_idle_threshold_seconds=3.0,
+        light_idle_interval_seconds=3.0,
+    )
+    assert b.update(0.5) == 3.0
+    assert b.update(10.0) == 3.0  # light-tier, still 3s
+    assert b.update(59.9) == 3.0
+
+
+def test_light_idle_resets_on_activity():
+    """User comes back active → interval drops from light back to base."""
+    b = IdleBackoff(
+        base_interval=1.0, max_interval=300,
+        idle_threshold_seconds=60,
+        light_idle_threshold_seconds=3.0,
+        light_idle_interval_seconds=3.0,
+    )
+    b.update(10.0)
+    assert b.current_interval == 3.0
+    b.update(0.1)  # input just happened
+    assert b.current_interval == 1.0
+
+
+def test_light_idle_disabled_when_threshold_none():
+    """Backward compat: no light_idle params → 2-tier behavior preserved."""
+    b = IdleBackoff(
+        base_interval=1.0, max_interval=300,
+        idle_threshold_seconds=60,
+    )
+    # Before deep threshold, interval stays at base
+    assert b.update(10.0) == 1.0
+    assert b.update(30.0) == 1.0
+    # Deep idle kicks in as before
+    assert b.update(60.0) == 2.0
+
+
+def test_light_idle_capped_by_max_interval():
+    """Light interval should never exceed max_interval."""
+    b = IdleBackoff(
+        base_interval=1.0, max_interval=2.0,
+        idle_threshold_seconds=60,
+        light_idle_threshold_seconds=3.0,
+        light_idle_interval_seconds=10.0,  # way above max
+    )
+    assert b.update(10.0) == 2.0  # clamped to max

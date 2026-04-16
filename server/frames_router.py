@@ -41,6 +41,7 @@ def upload_frame(
     cursor_y: int = Form(-1),
     focus_rect: str = Form(""),  # JSON array or empty
     window_title_raw: str = Form(""),
+    had_input: int = Form(0),  # 1 iff key/mouse input between prev capture and this one
     image: UploadFile = File(...),
     _auth=Depends(require_upload_key),
 ):
@@ -84,6 +85,7 @@ def upload_frame(
         cursor_y=int(cursor_y),
         focus_rect=focus_rect_list,
         window_title_raw=window_title_raw,
+        had_input=bool(had_input),
     )
     if row_id is None:
         # Duplicate (same emp+session+frame_index). The file is now redundant

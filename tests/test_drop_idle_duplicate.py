@@ -250,3 +250,31 @@ def test_drop_then_change_then_drop_sequence(tmp_path, monkeypatch):
     assert not captures[1].exists()  # frame 2 dropped
     assert captures[2].exists()  # frame 3 kept
     assert not captures[3].exists()  # frame 4 dropped
+
+
+# ---------------------------------------------------------------------------
+# had_input detection (v0.4.9)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_input_since_first_capture_reports_false(tmp_path, monkeypatch):
+    """First capture (prev_capture_time=0) should report False — no prior
+    window to compare against."""
+    d = _make_daemon(tmp_path, monkeypatch, idle_secs=0.0)
+    assert d._detect_input_since(0.0) is False
+
+
+def test_detect_input_since_input_inside_window(tmp_path, monkeypatch):
+    """idle_secs < elapsed → input happened in the window → True."""
+    import time as _t
+    d = _make_daemon(tmp_path, monkeypatch, idle_secs=0.2)
+    prev = _t.monotonic() - 1.0  # 1s ago
+    assert d._detect_input_since(prev) is True
+
+
+def test_detect_input_since_input_older_than_window(tmp_path, monkeypatch):
+    """idle_secs > elapsed → input is older than the window → False."""
+    import time as _t
+    d = _make_daemon(tmp_path, monkeypatch, idle_secs=10.0)
+    prev = _t.monotonic() - 1.0  # 1s ago
+    assert d._detect_input_since(prev) is False

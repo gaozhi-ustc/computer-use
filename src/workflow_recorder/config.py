@@ -71,11 +71,26 @@ class SessionConfig(BaseModel):
 
 
 class IdleDetectionConfig(BaseModel):
-    """Backoff capture interval when user is idle (no mouse/keyboard input)."""
+    """Backoff capture interval when user is idle (no mouse/keyboard input).
+
+    Three-tier ladder (v0.4.9):
+      • 0 .. light_idle_threshold_seconds   → base capture interval
+      • light_idle .. idle_threshold        → light_idle_interval_seconds (3s)
+      • idle_threshold .. max_interval      → exponential backoff ×backoff_factor
+    """
     enabled: bool = True
-    idle_threshold_seconds: float = 60.0  # how long without input -> idle
+    idle_threshold_seconds: float = 60.0  # how long without input -> deep idle
     max_interval_seconds: float = 300.0   # cap on backed-off interval (5 min)
     backoff_factor: float = 2.0           # multiply interval by this each idle tick
+
+    light_idle_threshold_seconds: float = 3.0
+    """When base interval < light_idle_interval_seconds and the user has been
+    idle at least this long (but < idle_threshold_seconds), bump the capture
+    interval to light_idle_interval_seconds. Saves bandwidth between bursts
+    of activity without waiting for the full deep-idle 60s threshold."""
+
+    light_idle_interval_seconds: float = 3.0
+    """Capture interval used when in the light-idle tier."""
 
 
 class AggregationConfig(BaseModel):

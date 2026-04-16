@@ -294,3 +294,51 @@ def test_upload_sets_status_uploaded(client_and_db):
     from server import db
     frame = db.get_frame(frame_id)
     assert frame["analysis_status"] == "uploaded"
+
+
+def test_upload_persists_had_input_flag(client_and_db):
+    """Client-reported had_input is stored on the frame row."""
+    client, db_path = client_and_db
+    import io
+    from server import db
+
+    # Frame 0: had_input=1
+    r1 = client.post(
+        "/frames/upload",
+        data={
+            "employee_id": "E001", "session_id": "sess-had-input",
+            "frame_index": "0", "timestamp": "1700000000.0",
+            "had_input": "1",
+        },
+        files={"image": ("0.png", io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100), "image/png")},
+    )
+    assert r1.status_code == 200
+    fid1 = r1.json()["id"]
+    assert db.get_frame(fid1)["had_input"] == 1
+
+    # Frame 1: had_input=0
+    r2 = client.post(
+        "/frames/upload",
+        data={
+            "employee_id": "E001", "session_id": "sess-had-input",
+            "frame_index": "1", "timestamp": "1700000001.0",
+            "had_input": "0",
+        },
+        files={"image": ("1.png", io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100), "image/png")},
+    )
+    assert r2.status_code == 200
+    fid2 = r2.json()["id"]
+    assert db.get_frame(fid2)["had_input"] == 0
+
+    # Frame 2: had_input omitted → defaults to 0
+    r3 = client.post(
+        "/frames/upload",
+        data={
+            "employee_id": "E001", "session_id": "sess-had-input",
+            "frame_index": "2", "timestamp": "1700000002.0",
+        },
+        files={"image": ("2.png", io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100), "image/png")},
+    )
+    assert r3.status_code == 200
+    fid3 = r3.json()["id"]
+    assert db.get_frame(fid3)["had_input"] == 0
