@@ -108,6 +108,32 @@ def test_enqueue_uploads_multipart(tmp_path, sample_png, monkeypatch):
     assert call["filenames"] == ["image"]
 
 
+def test_enqueue_window_title_raw_field(tmp_path, sample_png, monkeypatch):
+    """window_title_raw is forwarded as a form field. Default is empty
+    string (for platforms where window detection isn't available)."""
+    fake = FakeClient()
+    monkeypatch.setattr("workflow_recorder.image_uploader._build_client",
+                        lambda: fake)
+    up = _make_uploader(tmp_path)
+    up.start()
+    try:
+        up.enqueue(image_path=sample_png, frame_index=1, timestamp=1.0,
+                   window_title_raw="chrome.exe")
+        up.enqueue(image_path=sample_png, frame_index=2, timestamp=2.0,
+                   window_title_raw="")
+        up.enqueue(image_path=sample_png, frame_index=3, timestamp=3.0)  # default
+        deadline = time.time() + 2.0
+        while time.time() < deadline and len(fake.calls) < 3:
+            time.sleep(0.01)
+    finally:
+        up.stop(timeout=2.0)
+
+    assert len(fake.calls) == 3
+    assert fake.calls[0]["data"]["window_title_raw"] == "chrome.exe"
+    assert fake.calls[1]["data"]["window_title_raw"] == ""
+    assert fake.calls[2]["data"]["window_title_raw"] == ""
+
+
 def test_enqueue_had_input_field(tmp_path, sample_png, monkeypatch):
     """had_input=True must be serialized as form field 'had_input' = '1'.
     had_input=False (or omitted) must serialize as '0'."""

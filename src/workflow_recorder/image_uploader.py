@@ -108,12 +108,19 @@ class ImageUploader:
         cursor_y: int = -1,
         focus_rect: list[int] | None = None,
         had_input: bool = False,
+        window_title_raw: str = "",
     ) -> None:
         """Queue one image for upload. Non-blocking; spills to buffer on full queue.
 
         had_input: True iff any mouse/keyboard event happened between the
         previous capture and this one. Stored server-side for downstream
         "was the user actually interacting?" analytics.
+
+        window_title_raw: Active-window identifier (typically the process
+        name, e.g. "chrome.exe"). Server uses it as the "application" signal
+        for frame grouping and as a display fallback when vision analysis
+        hasn't filled in `frames.application`. Empty string on platforms
+        where window detection is unavailable (e.g. Linux).
         """
         item = {
             "image_path": str(image_path),
@@ -123,6 +130,7 @@ class ImageUploader:
             "cursor_y": int(cursor_y),
             "focus_rect": focus_rect,
             "had_input": bool(had_input),
+            "window_title_raw": str(window_title_raw or ""),
         }
         if self._thread is None:
             # Not started — buffer for next start
@@ -195,6 +203,7 @@ class ImageUploader:
             "cursor_y": str(item.get("cursor_y", -1)),
             "focus_rect": focus_str,
             "had_input": "1" if item.get("had_input") else "0",
+            "window_title_raw": str(item.get("window_title_raw") or ""),
         }
         url = f"{self.server_url}/frames/upload"
         headers = {"X-API-Key": self.api_key} if self.api_key else {}

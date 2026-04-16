@@ -412,7 +412,7 @@ def query_frames(
         "received_at, application, window_title, user_action, text_content, "
         "confidence, mouse_position_json, ui_elements_json, context_data_json, "
         "image_path, analysis_status, cursor_x, cursor_y, focus_rect_json, "
-        "skip_reason, had_input "
+        "skip_reason, had_input, window_title_raw "
         f"FROM frames {where} "
         "ORDER BY recorded_at DESC, frame_index DESC "
         "LIMIT ? OFFSET ?"

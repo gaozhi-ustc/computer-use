@@ -50,6 +50,10 @@ export interface FrameInfo {
   }>
   // v0.5.2 server-side pre-analysis filter
   skip_reason?: '' | 'near_duplicate' | 'low_signal' | string
+  // v0.5.3 client-captured raw window identifier (typically process name)
+  // — used as a display fallback when vision analysis hasn't populated
+  // `application`.
+  window_title_raw?: string
 }
 
 export interface SessionDetail {

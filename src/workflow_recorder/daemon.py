@@ -308,6 +308,17 @@ class Daemon:
             # duplicate check: idle_secs < elapsed → input happened.
             had_input = self._detect_input_since(prev_capture_time)
 
+            # Prefer process_name as the application identifier — it's
+            # stable across documents (chrome.exe / EXCEL.EXE) which is
+            # what the grouper's app-switch detector expects. Fall back
+            # to window_title only if the foreground window has no
+            # resolvable process (shouldn't normally happen).
+            window_title_raw = ""
+            if window_ctx is not None:
+                window_title_raw = (
+                    window_ctx.process_name or window_ctx.window_title or ""
+                )
+
             self.session.frames_captured += 1
             if self.uploader is not None and self.config.server.enabled:
                 self.uploader.enqueue(
@@ -318,6 +329,7 @@ class Daemon:
                     cursor_y=result.cursor_y,
                     focus_rect=result.focus_rect,
                     had_input=had_input,
+                    window_title_raw=window_title_raw,
                 )
         except Exception as exc:
             log.exception("capture_failed", error=str(exc))

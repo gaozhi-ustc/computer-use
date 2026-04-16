@@ -390,7 +390,7 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
                   >
                     <template #header>
                       <NSpace align="center" :size="8">
-                        <span>#{{ frame.frame_index }} · {{ frame.application || '未知应用' }}</span>
+                        <span>#{{ frame.frame_index }} · {{ frame.application || frame.window_title_raw || '未知应用' }}</span>
                         <NTag
                           v-if="frame.skip_reason"
                           size="small"
