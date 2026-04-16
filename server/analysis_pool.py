@@ -169,6 +169,8 @@ def _auto_create_sop(session_id: str, employee_id: str) -> None:
     sop_id = db.insert_sop(
         title=f"SOP - {employee_id} / {session_id[:8]}",
         created_by="system",
+        source_session_id=session_id,
+        source_employee_id=employee_id,
     )
     db.update_sop_group_ids(sop_id, group_ids)
 

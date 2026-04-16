@@ -3,13 +3,41 @@ import { ref, computed, watch, onUnmounted } from 'vue'
 import type { FrameInfo } from '@/api/sessions'
 import client from '@/api/client'
 
+// ─── module-level fetch queue ──────────────────────────────────────────────
+// Browsers cap simultaneous socket use (~6 per origin); Chrome throws
+// ERR_INSUFFICIENT_RESOURCES when thousands of fetches queue up at once.
+// A small concurrency limit keeps things stable even when a page mounts
+// many FrameImage components simultaneously.
+const MAX_CONCURRENT_FETCHES = 4
+let activeFetches = 0
+const fetchWaiters: Array<() => void> = []
+
+async function acquireFetchSlot(): Promise<void> {
+  if (activeFetches < MAX_CONCURRENT_FETCHES) {
+    activeFetches++
+    return
+  }
+  await new Promise<void>((resolve) => fetchWaiters.push(resolve))
+  activeFetches++
+}
+
+function releaseFetchSlot(): void {
+  activeFetches--
+  const next = fetchWaiters.shift()
+  if (next) next()
+}
+// ───────────────────────────────────────────────────────────────────────────
+
 const props = withDefaults(defineProps<{
   frame: FrameInfo
   maxWidth?: string
   clickable?: boolean
+  /** Retained for API compatibility; no longer has any effect. */
+  eager?: boolean
 }>(), {
   maxWidth: '300px',
   clickable: true,
+  eager: false,
 })
 
 const emit = defineEmits<{
@@ -23,26 +51,38 @@ const loaded = ref(false)
 const errored = ref(false)
 const blobUrl = ref<string>('')
 
+let cancelled = false
+
 async function fetchImage() {
   if (blobUrl.value) {
     URL.revokeObjectURL(blobUrl.value)
     blobUrl.value = ''
   }
   loaded.value = false
+  await acquireFetchSlot()
+  if (cancelled) {
+    releaseFetchSlot()
+    return
+  }
   try {
     const resp = await client.get(`/api/frames/${props.frame.id}/image`, {
       responseType: 'blob',
     })
-    blobUrl.value = URL.createObjectURL(resp.data)
-    errored.value = false
+    if (!cancelled) {
+      blobUrl.value = URL.createObjectURL(resp.data)
+      errored.value = false
+    }
   } catch {
-    errored.value = true
+    if (!cancelled) errored.value = true
+  } finally {
+    releaseFetchSlot()
   }
 }
 
 watch(() => props.frame.id, fetchImage, { immediate: true })
 
 onUnmounted(() => {
+  cancelled = true
   if (blobUrl.value) {
     URL.revokeObjectURL(blobUrl.value)
   }
@@ -127,6 +167,9 @@ const focusOverlay = computed(() => {
       @load="onLoad"
       @error="onError"
     />
+    <div v-else-if="!errored" class="frame-placeholder">
+      <span>加载中…</span>
+    </div>
     <div v-if="errored" class="frame-error">
       <span>图片加载失败</span>
     </div>
@@ -159,6 +202,15 @@ const focusOverlay = computed(() => {
   align-items: center;
   justify-content: center;
   color: #999;
+  font-size: 12px;
+  background: #f5f5f5;
+}
+.frame-placeholder {
+  min-height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #bbb;
   font-size: 12px;
   background: #f5f5f5;
 }

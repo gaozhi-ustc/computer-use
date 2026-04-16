@@ -83,7 +83,7 @@ def list_sessions(
 
 @router.get("/{session_id}")
 def get_session(session_id: str, current_user: dict = Depends(get_current_user)):
-    """Get session detail with all frames."""
+    """Get session detail with all frames, enriched with group/SOP step info."""
     frames = db.query_frames(session_id=session_id, limit=10000)
     if not frames:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -92,6 +92,37 @@ def get_session(session_id: str, current_user: dict = Depends(get_current_user))
     allowed = filter_employee_ids(current_user)
     if allowed is not None and frames[0]["employee_id"] not in allowed:
         raise HTTPException(status_code=403, detail="Access denied")
+
+    # Build frame_id -> [group_index, ...] map (a frame can appear in multiple
+    # overlapping groups due to ±3 boundary overlap).
+    groups = db.list_frame_groups(session_id)
+    frame_to_groups: dict[int, list[int]] = {}
+    for g in groups:
+        gi = g["group_index"]
+        for fid in g.get("frame_ids", []):
+            frame_to_groups.setdefault(fid, []).append(gi)
+
+    # Build frame_id -> [sop_step_summary, ...] map from all SOPs for this session.
+    frame_to_steps: dict[int, list[dict]] = {}
+    with db.connect() as conn:
+        sop_rows = conn.execute(
+            "SELECT id FROM sops WHERE source_session_id = ?", (session_id,),
+        ).fetchall()
+    for sop_row in sop_rows:
+        sop_id = sop_row["id"]
+        for s in db.list_sop_steps(sop_id):
+            for fid in s.get("source_frame_ids", []) or []:
+                frame_to_steps.setdefault(fid, []).append({
+                    "sop_id": sop_id,
+                    "step_order": s.get("step_order", 0),
+                    "title": s.get("title", ""),
+                    "application": s.get("application", ""),
+                })
+
+    for f in frames:
+        fid = f["id"]
+        f["group_indices"] = frame_to_groups.get(fid, [])
+        f["sop_steps"] = frame_to_steps.get(fid, [])
 
     return {
         "session_id": session_id,

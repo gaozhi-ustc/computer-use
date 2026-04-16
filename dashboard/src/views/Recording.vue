@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { sessionsApi, type SessionInfo, type SessionDetail, type FrameInfo, type AnalysisStatus } from '@/api/sessions'
@@ -7,8 +7,8 @@ import { sopsApi } from '@/api/sops'
 import FrameImage from '@/components/FrameImage.vue'
 import {
   NCard, NSpace, NInput, NDatePicker, NTag, NBadge, NEmpty,
-  NSpin, NTimeline, NTimelineItem, NProgress, NGrid, NGi,
-  NScrollbar, NDescriptions, NDescriptionsItem, NCollapse, NCollapseItem,
+  NSpin, NTimeline, NTimelineItem, NGrid, NGi,
+  NScrollbar, NDescriptions, NDescriptionsItem,
   NButton, NModal, useMessage
 } from 'naive-ui'
 
@@ -50,6 +50,16 @@ const dateRange = ref<[number, number] | null>(null)
 const selectedSessionId = ref('')
 const generatingSop = ref(false)
 const analyzingSession = ref(false)
+
+const FRAMES_PAGE_SIZE = 100
+const framesPage = ref(1)
+const pagedFrames = computed(() => {
+  if (!selectedSession.value) return []
+  const end = framesPage.value * FRAMES_PAGE_SIZE
+  return selectedSession.value.frames.slice(0, end)
+})
+const totalFrames = computed(() => selectedSession.value?.frames.length || 0)
+const hasMoreFrames = computed(() => pagedFrames.value.length < totalFrames.value)
 
 async function generateSop() {
   if (!selectedSession.value) return
@@ -107,6 +117,7 @@ async function fetchSessions() {
 async function selectSession(session: SessionInfo) {
   selectedSessionId.value = session.session_id
   detailLoading.value = true
+  framesPage.value = 1
   try {
     const { data } = await sessionsApi.detail(session.session_id)
     selectedSession.value = data
@@ -146,18 +157,6 @@ function getAppColor(app: string): string {
     if (lower.includes(key)) return colors[key]
   }
   return 'default'
-}
-
-function getConfidenceType(confidence: number): 'success' | 'warning' | 'error' {
-  if (confidence >= 0.8) return 'success'
-  if (confidence >= 0.5) return 'warning'
-  return 'error'
-}
-
-function hasContextData(frame: FrameInfo): boolean {
-  const ctx = frame.context_data
-  if (!ctx || typeof ctx !== 'object') return false
-  return !!(ctx.excel_headers || ctx.page_title || ctx.nearby_content)
 }
 
 onMounted(fetchSessions)
@@ -268,7 +267,7 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
                   {{ selectedSession.frame_count }}
                 </NDescriptionsItem>
                 <NDescriptionsItem label="帧数据">
-                  {{ selectedSession.frames.length }} 帧已加载
+                  {{ pagedFrames.length }} / {{ totalFrames }} 帧已显示
                 </NDescriptionsItem>
               </NDescriptions>
 
@@ -297,7 +296,7 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
                 />
                 <NTimeline v-else>
                   <NTimelineItem
-                    v-for="frame in selectedSession.frames"
+                    v-for="frame in pagedFrames"
                     :key="frame.id"
                     :time="formatDate(frame.recorded_at)"
                   >
@@ -323,94 +322,58 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
                       </div>
                       <div class="frame-right">
                         <NSpace vertical :size="8">
-                          <span v-if="frame.user_action" class="frame-action">
-                            {{ frame.user_action }}
-                          </span>
-                          <NSpace align="center" :size="8">
-                            <span class="confidence-label">置信度</span>
-                            <NProgress
-                              type="line"
-                              :percentage="Math.round(frame.confidence * 100)"
-                              :status="getConfidenceType(frame.confidence)"
-                              :show-indicator="true"
-                              style="width: 160px"
-                            />
+                          <NSpace v-if="frame.group_indices && frame.group_indices.length > 0" :size="4" align="center">
+                            <span class="meta-label">所属分组</span>
+                            <NTag
+                              v-for="gi in frame.group_indices"
+                              :key="gi"
+                              size="small"
+                              type="info"
+                            >Group {{ gi }}</NTag>
                           </NSpace>
-                          <NCollapse>
-                            <NCollapseItem title="详细信息" name="detail">
-                              <NDescriptions
-                                label-placement="left"
-                                :column="1"
-                                size="small"
+                          <span v-if="!frame.group_indices || frame.group_indices.length === 0" class="meta-empty">
+                            尚未参与分组（session 未分析）
+                          </span>
+
+                          <div v-if="frame.sop_steps && frame.sop_steps.length > 0">
+                            <span class="meta-label">对应 SOP 步骤</span>
+                            <div class="sop-step-list">
+                              <div
+                                v-for="(step, sidx) in frame.sop_steps"
+                                :key="sidx"
+                                class="sop-step-item"
+                                @click="router.push(`/sops/${step.sop_id}`)"
                               >
-                                <NDescriptionsItem label="窗口标题">
-                                  {{ frame.window_title || '-' }}
-                                </NDescriptionsItem>
-                                <NDescriptionsItem label="文本内容">
-                                  {{ frame.text_content || '-' }}
-                                </NDescriptionsItem>
-                                <NDescriptionsItem label="鼠标位置">
-                                  {{ frame.mouse_position?.join(', ') || '-' }}
-                                </NDescriptionsItem>
-                                <NDescriptionsItem label="UI元素">
-                                  <NSpace v-if="frame.ui_elements && frame.ui_elements.length > 0" vertical :size="4">
-                                    <NTag
-                                      v-for="(el, idx) in frame.ui_elements"
-                                      :key="idx"
-                                      size="small"
-                                    >
-                                      {{ el.name }} ({{ el.element_type }}) [{{ el.coordinates.join(', ') }}]
-                                    </NTag>
-                                  </NSpace>
-                                  <span v-else>-</span>
-                                </NDescriptionsItem>
-                                <template v-if="hasContextData(frame)">
-                                  <NDescriptionsItem
-                                    v-if="frame.context_data.excel_headers"
-                                    label="Excel 表头"
-                                  >
-                                    <NSpace :size="4" wrap>
-                                      <NTag
-                                        v-for="(h, idx) in (frame.context_data.excel_headers as string[])"
-                                        :key="idx"
-                                        size="small"
-                                        type="info"
-                                      >
-                                        {{ h }}
-                                      </NTag>
-                                    </NSpace>
-                                    <div
-                                      v-if="frame.context_data.active_cell || frame.context_data.sheet_name"
-                                      style="margin-top: 6px; color: #999; font-size: 12px;"
-                                    >
-                                      <span v-if="frame.context_data.sheet_name">Sheet: {{ frame.context_data.sheet_name }}</span>
-                                      <span v-if="frame.context_data.active_cell" style="margin-left: 12px;">单元格: {{ frame.context_data.active_cell }}</span>
-                                    </div>
-                                  </NDescriptionsItem>
-                                  <NDescriptionsItem
-                                    v-if="frame.context_data.page_title"
-                                    label="页面标题"
-                                  >
-                                    {{ frame.context_data.page_title }}
-                                    <div v-if="frame.context_data.url" style="color: #999; font-size: 12px; margin-top: 2px;">
-                                      {{ frame.context_data.url }}
-                                    </div>
-                                  </NDescriptionsItem>
-                                  <NDescriptionsItem
-                                    v-if="frame.context_data.nearby_content"
-                                    label="附近内容"
-                                  >
-                                    {{ frame.context_data.nearby_content }}
-                                  </NDescriptionsItem>
-                                </template>
-                              </NDescriptions>
-                            </NCollapseItem>
-                          </NCollapse>
+                                <NTag size="small" type="success">
+                                  SOP#{{ step.sop_id }} · 步骤 {{ step.step_order }}
+                                </NTag>
+                                <span class="sop-step-title">{{ step.title }}</span>
+                                <span v-if="step.application" class="sop-step-app">
+                                  [{{ step.application }}]
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                          <span v-else-if="frame.group_indices && frame.group_indices.length > 0" class="meta-empty">
+                            未被任何 SOP 步骤引用（可能是过渡帧）
+                          </span>
+
+                          <NSpace :size="12" style="color: #999; font-size: 12px;">
+                            <span>光标: ({{ frame.cursor_x ?? '-' }}, {{ frame.cursor_y ?? '-' }})</span>
+                            <span v-if="frame.focus_rect && frame.focus_rect.length === 4">
+                              焦点框: [{{ frame.focus_rect.join(', ') }}]
+                            </span>
+                          </NSpace>
                         </NSpace>
                       </div>
                     </div>
                   </NTimelineItem>
                 </NTimeline>
+                <NSpace v-if="hasMoreFrames" justify="center" style="padding: 16px 0;">
+                  <NButton size="small" @click="framesPage++">
+                    加载更多（已显示 {{ pagedFrames.length }} / {{ totalFrames }}）
+                  </NButton>
+                </NSpace>
               </NScrollbar>
             </template>
           </NSpin>
@@ -427,13 +390,25 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
       <template v-if="modalFrame">
         <div style="display: flex; gap: 16px;">
           <div style="flex: 0 0 auto;">
-            <FrameImage :frame="modalFrame" max-width="80vw" :clickable="false" />
+            <FrameImage :frame="modalFrame" max-width="80vw" :clickable="false" eager />
           </div>
           <div style="flex: 1 1 auto; overflow-y: auto; max-height: 85vh;">
-            <h3>{{ modalFrame.user_action || '(无分析)' }}</h3>
-            <p v-if="modalFrame.application">应用: {{ modalFrame.application }}</p>
-            <p v-if="modalFrame.window_title">窗口: {{ modalFrame.window_title }}</p>
-            <p v-if="modalFrame.text_content">文本: {{ modalFrame.text_content }}</p>
+            <h3>Frame #{{ modalFrame.frame_index }}</h3>
+            <p v-if="modalFrame.group_indices && modalFrame.group_indices.length > 0">
+              所属分组: Group {{ modalFrame.group_indices.join(', Group ') }}
+            </p>
+            <p>光标: ({{ modalFrame.cursor_x ?? '-' }}, {{ modalFrame.cursor_y ?? '-' }})</p>
+            <div v-if="modalFrame.sop_steps && modalFrame.sop_steps.length > 0">
+              <h4>对应 SOP 步骤</h4>
+              <ul>
+                <li v-for="(step, sidx) in modalFrame.sop_steps" :key="sidx">
+                  <a @click.prevent="router.push(`/sops/${step.sop_id}`)" style="cursor: pointer; color: #18a058;">
+                    SOP#{{ step.sop_id }} · 步骤 {{ step.step_order }}: {{ step.title }}
+                  </a>
+                  <span v-if="step.application" style="color: #999; margin-left: 6px;">[{{ step.application }}]</span>
+                </li>
+              </ul>
+            </div>
           </div>
         </div>
       </template>
@@ -466,15 +441,49 @@ watch([employeeFilter, dateRange], fetchSessions, { deep: true })
   color: #999;
 }
 
-.frame-action {
-  font-size: 14px;
+.meta-label {
+  font-size: 12px;
+  color: #666;
+  font-weight: 500;
+  white-space: nowrap;
+  margin-right: 4px;
+}
+
+.meta-empty {
+  font-size: 12px;
+  color: #aaa;
+  font-style: italic;
+}
+
+.sop-step-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.sop-step-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.sop-step-item:hover {
+  background: #f0f9f4;
+}
+
+.sop-step-title {
+  font-size: 13px;
   color: #333;
 }
 
-.confidence-label {
+.sop-step-app {
   font-size: 12px;
-  color: #666;
-  white-space: nowrap;
+  color: #999;
 }
 
 .frame-row {

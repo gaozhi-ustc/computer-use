@@ -40,6 +40,14 @@ export interface FrameInfo {
   cursor_x?: number  // -1 if OS capture unavailable
   cursor_y?: number
   focus_rect?: number[] | null  // [x1, y1, x2, y2] in image pixels
+  // v0.5.x group-analysis enrichment
+  group_indices?: number[]  // which frame_groups contain this frame
+  sop_steps?: Array<{
+    sop_id: number
+    step_order: number
+    title: string
+    application: string
+  }>
 }
 
 export interface SessionDetail {
