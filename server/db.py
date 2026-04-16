@@ -244,9 +244,20 @@ def _migrate_add_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE frames ADD COLUMN cursor_y INTEGER DEFAULT -1")
     if "focus_rect_json" not in cols:
         conn.execute("ALTER TABLE frames ADD COLUMN focus_rect_json TEXT DEFAULT ''")
+    # v0.5.2: server-side pre-analysis filter. Empty string = kept.
+    # Values: 'near_duplicate' (phash near-same within heartbeat window),
+    # 'low_signal' (empty canvas / loading splash). Images are retained
+    # on disk regardless so thresholds can be retuned by re-running the
+    # filter without re-uploading.
+    if "skip_reason" not in cols:
+        conn.execute("ALTER TABLE frames ADD COLUMN skip_reason TEXT DEFAULT ''")
     # Index for AnalysisPool worker queue lookup
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_frames_status ON frames(analysis_status, id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_frames_session_skip "
+        "ON frames(session_id, skip_reason)"
     )
 
 
