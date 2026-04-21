@@ -2,7 +2,9 @@
 
 ## 项目概述
 
-Windows 后台常驻截屏 daemon，每 3 秒捕获屏幕 + OS 级鼠标/焦点坐标，**上传原图到服务端**。服务端从 `api_keys.txt` 读取多把 DashScope key，**每把 key 一个 worker 线程**并行调用 **Qwen3.5-Plus 视觉模型**分析每帧，结果按员工 ID 归档到 SQLite。
+Windows / macOS 后台常驻截屏 daemon，每 3 秒捕获屏幕 + OS 级鼠标/焦点坐标，**上传原图到服务端**。服务端从 `api_keys.txt` 读取多把 DashScope key，**每把 key 一个 worker 线程**并行调用 **Qwen3.5-Plus 视觉模型**分析每帧，结果按员工 ID 归档到 SQLite。
+
+**macOS 支持（v0.4.11 port）**：使用 pyobjc（Quartz / AppKit / ApplicationServices）实现 Win32 等价物——`CGEventGetLocation` 代替 `GetCursorPos`，`CGEventSourceSecondsSinceLastEventType` 代替 `GetLastInputInfo`，`CGEventSourceCounterForEventType` 代替 `GetAsyncKeyState` 轮询，AX API 代替 `GetFocus`。需要操作系统授权：**Screen Recording**（mss 抓屏必需）+ **Accessibility**（可选，没授权时 focus_rect 返回 None，黄框 overlay 缺失但其余功能正常）。
 
 配套 **Web Dashboard**（Vue 3 + Naive UI）提供：录制回放（图片+AI 分析+鼠标红框/焦点黄框 overlay）、SOP 自动提炼与编辑、效率分析、合规审计、用户管理、分析队列监控。
 
@@ -163,10 +165,17 @@ dashboard/
 │           └── Header.vue    # 顶栏（用户名 + 角色标签 + 退出）
 └── dist/                     # 构建输出，FastAPI serve 此目录
 installer/
-├── build.py                  # 构建自动化脚本
-├── workflow_recorder.spec    # PyInstaller 打包配置
+├── build.py                  # Windows 构建自动化脚本
+├── workflow_recorder.spec    # Windows PyInstaller 打包配置
 ├── workflow_recorder.iss     # Inno Setup 安装向导（v0.2.0: 单模型 qwen + 员工 ID）
-└── verify_build.py           # 构建产物校验
+├── verify_build.py           # 构建产物校验
+└── macos/                    # macOS 打包（.app bundle + .pkg 安装器 + LaunchAgent）
+    ├── build.py              #   一键构建：PyInstaller → pkgbuild → productbuild
+    ├── workflow_recorder_macos.spec  #   macOS PyInstaller（BUNDLE，pyobjc hidden imports）
+    ├── com.workflow-recorder.plist   #   LaunchAgent 模板（用户级，登录自启 + 崩溃自愈）
+    ├── scripts/postinstall   #   osascript 向导填 employee_id/api_key/server_url，装 plist
+    ├── scripts/preuninstall  #   备用（macOS .pkg 无原生卸载）
+    └── uninstall.sh          #   管理员卸载脚本（随 .pkg 一起装到 .app/Contents/Resources/）
 tests/
 ├── conftest.py               # 测试 fixture + pytest markers 定义
 ├── test_*.py                 # 196 个单元测试（含 auth/users/sessions/sops/stats/permissions）
@@ -186,6 +195,11 @@ PYTHONPATH=src python3 -m workflow_recorder -c model_config.json
 
 # 构建 Windows 安装程序
 python installer/build.py --installer
+
+# 构建 macOS 安装程序 (.app + .pkg)
+# 前置：在 macOS 上运行，需要 pip install pyinstaller + pyobjc-*
+python installer/macos/build.py          # 仅 .app
+python installer/macos/build.py --pkg    # .app + .pkg (dist/WorkflowRecorder-<ver>-macos.pkg)
 
 # ── 服务端 ──
 # 安装服务端依赖
@@ -332,6 +346,21 @@ model    = qwen3.5-plus
 - 配置文件在升级时保留，卸载时不删除
 - 构建：`python installer/build.py --installer`
 - 当前版本：v0.2.0（单模型 qwen3.5-plus + 服务端推送）
+
+## macOS 安装程序
+
+基于 PyInstaller + `pkgbuild/productbuild` 构建（Xcode 命令行工具已自带，无需额外第三方依赖）：
+
+- **产物**：`dist/WorkflowRecorder-<ver>-macos.pkg`（~48MB 双击即装）安装到 `/Applications/WorkflowRecorder.app`
+- **App bundle**：headless daemon（`LSUIElement=1` 无 Dock 图标），Info.plist 含 `NSScreenCaptureUsageDescription` 等权限提示
+- **配置位置**：`~/Library/Application Support/WorkflowRecorder/model_config.json`（升级保留）
+- **自启**：通过用户级 LaunchAgent `~/Library/LaunchAgents/com.workflow-recorder.plist` 在登录时启动、崩溃自愈（30s throttle）
+- **日志**：`~/Library/Logs/WorkflowRecorder/{stdout,stderr}.log`
+- **安装向导**：postinstall 脚本用 osascript dialog 收 employee_id / API key / server URL → 写 `model_config.json`；如果用户取消任一关键项，**跳过 launchctl bootstrap**（避免无 TTY 环境下 init_wizard 反复崩溃进入 throttle 循环），并提示用户手动补齐后再启动
+- **卸载**：macOS `.pkg` 无原生卸载，随包一起装到 `.app/Contents/Resources/uninstall.sh`，`bash uninstall.sh [--purge]` 清理
+- **权限**：首次捕获时系统弹 Screen Recording 授权；focus_rect overlay 需额外开 Accessibility（可选）
+- **Screen Recording TCC 归属陷阱**：如果你先在 Terminal 里跑过 `workflow-recorder`，macOS 可能把权限绑到 Terminal 的归属链而不是 bundle 自己；LaunchAgent 再拉起来时权限不生效，截图**只剩桌面、缺窗口**。症状：`(255,255,255)` 白色像素几乎为 0，色彩全是桌面壁纸色。修复：`tccutil reset ScreenCapture com.workflow-recorder.daemon` → `launchctl bootout/bootstrap` → 这次弹窗直接从 launchd 发起，归属链干净，点 Allow 后权限才正确绑到 bundle 上
+- **构建**：`python installer/macos/build.py --pkg`；可选代码签名 `--sign "Developer ID Installer: Name (TEAMID)"`（内部分发可留 ad-hoc）
 
 ## 待完成
 

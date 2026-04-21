@@ -1,10 +1,20 @@
-"""Win32 cursor position + focused-control rect capture.
+"""OS-level cursor position + focused-control rect capture.
 
 These are authoritative for "where is the user interacting on screen" —
 captured at screenshot time, pixel-accurate, and independent of what qwen
-later decides about the image. On non-Windows platforms the functions
-return None so the rest of the pipeline treats those frames as having no
-interaction marker.
+later decides about the image.
+
+Platform support:
+  • Windows: Win32 user32/GetCursorPos/GetFocus/GetAsyncKeyState
+  • macOS:   Quartz / ApplicationServices (pyobjc)
+      - cursor: CGEventGetLocation
+      - focus rect: Accessibility API (requires user-granted permission)
+      - keystroke/click detection: CGEventSourceCounterForEventType
+
+On unsupported platforms (or when the underlying API call fails — e.g.
+Accessibility permission not granted on macOS), these functions return
+None / False so the rest of the pipeline treats the frame as having no
+interaction marker rather than crashing.
 """
 
 from __future__ import annotations
@@ -12,10 +22,21 @@ from __future__ import annotations
 import sys
 
 
+# ---------------------------------------------------------------------------
+# Cursor position
+# ---------------------------------------------------------------------------
+
+
 def get_cursor_position() -> tuple[int, int] | None:
     """Return the cursor's current screen coordinates, or None if unavailable."""
-    if sys.platform != "win32":
-        return None
+    if sys.platform == "win32":
+        return _get_cursor_position_win32()
+    if sys.platform == "darwin":
+        return _get_cursor_position_macos()
+    return None
+
+
+def _get_cursor_position_win32() -> tuple[int, int] | None:
     try:
         import ctypes
         from ctypes import wintypes
@@ -28,14 +49,32 @@ def get_cursor_position() -> tuple[int, int] | None:
         return None
 
 
+def _get_cursor_position_macos() -> tuple[int, int] | None:
+    try:
+        from Quartz import CGEventCreate, CGEventGetLocation
+    except ImportError:
+        return None
+    try:
+        evt = CGEventCreate(None)
+        if evt is None:
+            return None
+        pt = CGEventGetLocation(evt)
+        return (int(pt.x), int(pt.y))
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Mouse motion sampling
+# ---------------------------------------------------------------------------
+
+
 def is_mouse_moving(sample_interval_ms: int = 150) -> bool:
     """Return True if the cursor moved during a short sample window.
 
-    Samples GetCursorPos() twice with a brief gap. Returns False on
-    non-Windows or if either sample fails.
+    Samples cursor position twice with a brief gap. Returns False on
+    unsupported platforms or if either sample fails.
     """
-    if sys.platform != "win32":
-        return False
     p1 = get_cursor_position()
     if p1 is None:
         return False
@@ -47,6 +86,11 @@ def is_mouse_moving(sample_interval_ms: int = 150) -> bool:
     return p1 != p2
 
 
+# ---------------------------------------------------------------------------
+# Wait for click/key input
+# ---------------------------------------------------------------------------
+
+
 def wait_for_click_or_key(
     max_wait_seconds: float = 3.0,
     poll_interval_ms: int = 100,
@@ -55,16 +99,25 @@ def wait_for_click_or_key(
     """Block until a mouse click or keystroke is detected, then return True.
 
     Returns False if max_wait_seconds elapses without a click/keystroke,
-    or if stop_event is set. No-op on non-Windows (returns False immediately).
-
-    Watches virtual-key codes for: mouse buttons (LBUTTON, RBUTTON,
-    MBUTTON, XBUTTON1, XBUTTON2); common navigation/editing keys
-    (Backspace, Tab, Enter, Space, Escape, Delete, arrows, Home, End,
-    PageUp/Down, Insert); digits 0-9; letters A-Z; numpad 0-9;
-    function keys F1-F24.
+    or if stop_event is set. On unsupported platforms returns False
+    immediately (callers fall through to a time-based capture).
     """
-    if sys.platform != "win32":
-        return False
+    if sys.platform == "win32":
+        return _wait_for_click_or_key_win32(
+            max_wait_seconds, poll_interval_ms, stop_event
+        )
+    if sys.platform == "darwin":
+        return _wait_for_click_or_key_macos(
+            max_wait_seconds, poll_interval_ms, stop_event
+        )
+    return False
+
+
+def _wait_for_click_or_key_win32(
+    max_wait_seconds: float,
+    poll_interval_ms: int,
+    stop_event,
+) -> bool:
     try:
         import ctypes
         user32 = ctypes.windll.user32
@@ -82,7 +135,6 @@ def wait_for_click_or_key(
     watched.extend(range(0x60, 0x6F + 1))   # numpad 0-9 + ops
     watched.extend(range(0x70, 0x87 + 1))   # F1-F24
 
-    # Clear any historical "pressed since last call" bits.
     for vk in watched:
         try:
             user32.GetAsyncKeyState(vk)
@@ -96,17 +148,96 @@ def wait_for_click_or_key(
             return False
         for vk in watched:
             state = user32.GetAsyncKeyState(vk)
-            if state & 0x0001:  # edge-triggered: pressed since last call
+            if state & 0x0001:
                 return True
         _time.sleep(poll_s)
     return False
 
 
+def _wait_for_click_or_key_macos(
+    max_wait_seconds: float,
+    poll_interval_ms: int,
+    stop_event,
+) -> bool:
+    """Poll CGEventSourceCounterForEventType for mouse/keyboard events.
+
+    The counter is a monotonically increasing count of events of a given
+    type across all sources on the system. We sum counters for the event
+    types we care about, snapshot the baseline, then poll until the sum
+    increases or the deadline expires.
+
+    No Accessibility permission required for this API.
+    """
+    try:
+        from Quartz import (
+            CGEventSourceCounterForEventType,
+            kCGEventSourceStateCombinedSessionState,
+            kCGEventLeftMouseDown,
+            kCGEventRightMouseDown,
+            kCGEventOtherMouseDown,
+            kCGEventKeyDown,
+            kCGEventFlagsChanged,
+            kCGEventScrollWheel,
+        )
+    except ImportError:
+        return False
+
+    import time as _time
+
+    source_state = kCGEventSourceStateCombinedSessionState
+    watched_types = (
+        kCGEventLeftMouseDown,
+        kCGEventRightMouseDown,
+        kCGEventOtherMouseDown,
+        kCGEventKeyDown,
+        kCGEventFlagsChanged,
+        kCGEventScrollWheel,
+    )
+
+    def _total() -> int:
+        try:
+            return sum(
+                int(CGEventSourceCounterForEventType(source_state, et))
+                for et in watched_types
+            )
+        except Exception:
+            return -1
+
+    baseline = _total()
+    if baseline < 0:
+        return False
+
+    deadline = _time.monotonic() + max_wait_seconds
+    poll_s = max(0.01, poll_interval_ms / 1000.0)
+    while _time.monotonic() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        current = _total()
+        if current < 0:
+            return False
+        if current > baseline:
+            return True
+        _time.sleep(poll_s)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Focused-control rect
+# ---------------------------------------------------------------------------
+
+
 def get_focus_rect() -> list[int] | None:
-    """Return the focused control's bounding rect [x1,y1,x2,y2] in screen coords,
-    or None if no focused control / platform not supported."""
-    if sys.platform != "win32":
-        return None
+    """Return the focused control's bounding rect [x1,y1,x2,y2] in screen
+    coords, or None if no focused control / platform not supported / the
+    OS API refused (e.g. missing Accessibility permission on macOS)."""
+    if sys.platform == "win32":
+        return _get_focus_rect_win32()
+    if sys.platform == "darwin":
+        return _get_focus_rect_macos()
+    return None
+
+
+def _get_focus_rect_win32() -> list[int] | None:
     try:
         import ctypes
         from ctypes import wintypes
@@ -121,6 +252,81 @@ def get_focus_rect() -> list[int] | None:
         return [int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)]
     except (OSError, AttributeError):
         return None
+
+
+def _get_focus_rect_macos() -> list[int] | None:
+    """Use the Accessibility API to find the focused UI element's screen rect.
+
+    Requires the operator to grant the hosting app "Accessibility" access
+    (System Settings → Privacy & Security → Accessibility). Without that,
+    every AX call returns an error and we fall back to None, which the
+    pipeline already tolerates.
+
+    macOS AX positions use the same top-left-origin screen coordinate
+    space as CGEventGetLocation — no y-flip needed for our usage.
+    """
+    try:
+        from AppKit import NSWorkspace
+        from ApplicationServices import (
+            AXUIElementCreateApplication,
+            AXUIElementCopyAttributeValue,
+            AXValueGetValue,
+            kAXFocusedUIElementAttribute,
+            kAXPositionAttribute,
+            kAXSizeAttribute,
+            kAXValueCGPointType,
+            kAXValueCGSizeType,
+        )
+    except ImportError:
+        return None
+
+    try:
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None:
+            return None
+        pid = int(app.processIdentifier())
+        if pid <= 0:
+            return None
+
+        app_ref = AXUIElementCreateApplication(pid)
+        if app_ref is None:
+            return None
+
+        err, focused = AXUIElementCopyAttributeValue(
+            app_ref, kAXFocusedUIElementAttribute, None
+        )
+        if err != 0 or focused is None:
+            return None
+
+        err_p, pos_val = AXUIElementCopyAttributeValue(
+            focused, kAXPositionAttribute, None
+        )
+        err_s, size_val = AXUIElementCopyAttributeValue(
+            focused, kAXSizeAttribute, None
+        )
+        if err_p != 0 or err_s != 0 or pos_val is None or size_val is None:
+            return None
+
+        # AXValueGetValue unpacks the opaque AXValue into a CGPoint / CGSize.
+        # pyobjc returns a tuple: (success_bool, struct_value). The struct
+        # exposes .x/.y or .width/.height attributes.
+        ok_p, point = AXValueGetValue(pos_val, kAXValueCGPointType, None)
+        ok_s, size = AXValueGetValue(size_val, kAXValueCGSizeType, None)
+        if not ok_p or not ok_s:
+            return None
+
+        x1 = int(point.x)
+        y1 = int(point.y)
+        x2 = int(point.x + size.width)
+        y2 = int(point.y + size.height)
+        return [x1, y1, x2, y2]
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Coordinate transforms
+# ---------------------------------------------------------------------------
 
 
 def screen_to_image_coords(
@@ -149,7 +355,6 @@ def screen_to_image_coords(
     img_x = int(rel_x * downscale_factor)
     img_y = int(rel_y * downscale_factor)
 
-    # Clamp to image pixel space (right edge can round up to width)
     img_w = int(monitor_width * downscale_factor)
     img_h = int(monitor_height * downscale_factor)
     img_x = max(0, min(img_x, img_w - 1))
@@ -182,7 +387,6 @@ def rect_to_image_coords(
     )
     if top_left is None and bot_right is None:
         return None
-    # If only one corner is in-monitor, clamp the other to the image bounds
     img_w = int(monitor_width * downscale_factor)
     img_h = int(monitor_height * downscale_factor)
     if top_left is None:

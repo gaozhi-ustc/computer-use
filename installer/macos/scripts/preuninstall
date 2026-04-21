@@ -1,0 +1,27 @@
+#!/bin/bash
+# Preuninstall hook — not invoked by Apple's .pkg uninstall (macOS has no
+# native uninstall for .pkg). Kept here as a reference for the
+# accompanying uninstall.sh script shipped alongside the .pkg so admins
+# can tear down a deployment cleanly.
+
+set -u
+
+TARGET_USER="${USER:-$(stat -f '%Su' /dev/console)}"
+TARGET_UID=$(id -u "$TARGET_USER")
+TARGET_HOME=$(dscl . -read "/Users/$TARGET_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+[ -z "$TARGET_HOME" ] && TARGET_HOME="/Users/$TARGET_USER"
+
+AGENT_FILE="$TARGET_HOME/Library/LaunchAgents/com.workflow-recorder.plist"
+
+sudo -u "$TARGET_USER" launchctl bootout "gui/${TARGET_UID}/com.workflow-recorder" 2>/dev/null || true
+sudo -u "$TARGET_USER" launchctl unload "$AGENT_FILE" 2>/dev/null || true
+rm -f "$AGENT_FILE"
+
+rm -rf /Applications/WorkflowRecorder.app
+
+# Config and logs are intentionally preserved so a reinstall keeps
+# the user's employee_id / API key. Admin can remove manually:
+#   rm -rf "$TARGET_HOME/Library/Application Support/WorkflowRecorder"
+#   rm -rf "$TARGET_HOME/Library/Logs/WorkflowRecorder"
+
+exit 0

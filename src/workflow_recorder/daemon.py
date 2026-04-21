@@ -5,6 +5,14 @@ Single-thread capture loop. Each capture:
 2. Enqueue for upload via ImageUploader
 3. Optionally back off if user is idle (idle_detector)
 4. Sleep until next interval
+
+Runs on Windows and macOS. On macOS the pipeline needs these OS
+permissions to be granted to the hosting process (Terminal, iTerm,
+or the compiled .app):
+  • Screen Recording  — required for mss to capture the display
+  • Accessibility     — required for get_focus_rect() via AX API
+                         (focus rect is optional; without it frames
+                          simply have no yellow focus overlay)
 """
 
 from __future__ import annotations
@@ -168,6 +176,11 @@ class Daemon:
                 return not self._stop_event.is_set()
 
             # Stationary path: ensure >= min_gap since the previous capture.
+            # First capture ever (no prior timestamp) fires immediately —
+            # `time.monotonic()` starts at process-launch on macOS/Linux,
+            # so we can't rely on a large absolute value to short-circuit.
+            if self._last_capture_time == 0.0:
+                return True
             now = time.monotonic()
             elapsed = now - self._last_capture_time
             if elapsed >= min_gap:

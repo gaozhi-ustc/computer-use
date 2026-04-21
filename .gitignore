@@ -41,3 +41,4 @@ frame_images/
 api_keys.txt
 smoke_frames.db
 dashboard_dev.db
+.DS_Store
