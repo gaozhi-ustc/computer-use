@@ -2,8 +2,8 @@
 
 Uses platform-specific APIs:
 - Windows: pywin32 (win32gui/win32process) + psutil
-- macOS: AppKit (for development/testing)
-- Linux: not supported
+- macOS:   AppKit (frontmost app) + Quartz (window bounds/title)
+- Linux:   not supported
 """
 
 from __future__ import annotations
@@ -49,12 +49,10 @@ def _get_active_window_win32() -> WindowContext | None:
         title = win32gui.GetWindowText(hwnd)
         rect = win32gui.GetWindowRect(hwnd)
 
-        # Check if maximized
         import win32con
         placement = win32gui.GetWindowPlacement(hwnd)
         is_maximized = placement[1] == win32con.SW_SHOWMAXIMIZED
 
-        # Get process info
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
         try:
             proc = psutil.Process(pid)
@@ -74,37 +72,65 @@ def _get_active_window_win32() -> WindowContext | None:
 
 
 def _get_active_window_macos() -> WindowContext | None:
-    """macOS fallback for development — uses AppKit."""
+    """Frontmost application + its frontmost on-screen window.
+
+    Uses NSWorkspace for the app identity and Quartz
+    CGWindowListCopyWindowInfo to find the topmost on-screen window
+    belonging to that PID. Window titles are only populated if the
+    hosting process has been granted Screen Recording permission; when
+    unavailable we fall back to the app's localized name.
+    """
     try:
         from AppKit import NSWorkspace
-        import subprocess
     except ImportError:
         return None
 
     try:
-        workspace = NSWorkspace.sharedWorkspace()
-        active_app = workspace.activeApplication()
-        if not active_app:
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None:
             return None
 
-        app_name = active_app.get("NSApplicationName", "unknown")
-        pid = active_app.get("NSApplicationProcessIdentifier", 0)
+        app_name = str(app.localizedName() or "unknown")
+        pid = int(app.processIdentifier() or 0)
 
-        # Get frontmost window title via AppleScript
-        script = 'tell application "System Events" to get name of first window of (first process whose frontmost is true)'
+        title = app_name
+        bounds: tuple[int, int, int, int] = (0, 0, 0, 0)
+
         try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=2,
+            from Quartz import (
+                CGWindowListCopyWindowInfo,
+                kCGWindowListOptionOnScreenOnly,
+                kCGWindowListExcludeDesktopElements,
+                kCGNullWindowID,
             )
-            title = result.stdout.strip() if result.returncode == 0 else app_name
-        except Exception:
-            title = app_name
+
+            opts = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements
+            windows = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) or []
+            for w in windows:
+                if int(w.get("kCGWindowOwnerPID", -1)) != pid:
+                    continue
+                # Skip invisible/layered system windows
+                if int(w.get("kCGWindowLayer", 0)) != 0:
+                    continue
+                b = w.get("kCGWindowBounds") or {}
+                x = int(b.get("X", 0))
+                y = int(b.get("Y", 0))
+                width = int(b.get("Width", 0))
+                height = int(b.get("Height", 0))
+                if width <= 0 or height <= 0:
+                    continue
+                bounds = (x, y, x + width, y + height)
+                name = w.get("kCGWindowName")
+                if name:
+                    title = str(name)
+                break
+        except ImportError:
+            pass
 
         return WindowContext(
             process_name=app_name,
             window_title=title,
-            window_rect=(0, 0, 0, 0),
+            window_rect=bounds,
             is_maximized=False,
             pid=pid,
         )

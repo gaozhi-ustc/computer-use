@@ -9,11 +9,13 @@ import time
 import pytest
 
 
-def test_is_mouse_moving_non_windows_returns_false(monkeypatch):
-    """On non-Windows the function should degrade gracefully."""
+def test_is_mouse_moving_unsupported_returns_false(monkeypatch):
+    """On unsupported platforms (not win32 / not darwin) the function
+    degrades gracefully. On darwin with Quartz installed the real cursor
+    may or may not be moving, so we skip there."""
     from workflow_recorder.capture import cursor_focus
-    if sys.platform == "win32":
-        pytest.skip("only meaningful on non-Windows")
+    if sys.platform in ("win32", "darwin"):
+        pytest.skip("only meaningful on unsupported platforms")
     assert cursor_focus.is_mouse_moving(sample_interval_ms=10) is False
 
 
@@ -39,11 +41,13 @@ def test_is_mouse_moving_failed_sample_returns_false(monkeypatch):
     assert cursor_focus.is_mouse_moving(sample_interval_ms=10) is False
 
 
-def test_wait_for_click_or_key_non_windows_returns_false_immediately():
-    """On non-Windows the function returns False without blocking."""
+def test_wait_for_click_or_key_unsupported_returns_false_immediately():
+    """On platforms without a supported backend the function returns
+    False without blocking. On darwin/win32 it polls until timeout, so
+    we skip there."""
     from workflow_recorder.capture.cursor_focus import wait_for_click_or_key
-    if sys.platform == "win32":
-        pytest.skip("only meaningful on non-Windows")
+    if sys.platform in ("win32", "darwin"):
+        pytest.skip("only meaningful on unsupported platforms")
     start = time.monotonic()
     assert wait_for_click_or_key(max_wait_seconds=1.0, poll_interval_ms=50) is False
     assert time.monotonic() - start < 0.2
@@ -56,23 +60,27 @@ def test_wait_for_click_or_key_respects_stop_event():
     stop.set()
     start = time.monotonic()
     result = wait_for_click_or_key(max_wait_seconds=5.0, poll_interval_ms=50, stop_event=stop)
-    # Non-Windows returns False before checking stop; Windows sees stop set.
+    # Unsupported platforms return False immediately; win32/darwin see stop set
+    # on the first poll iteration (well under the 50ms poll_interval).
     assert time.monotonic() - start < 0.3
     assert result is False
 
 
 def test_wait_for_click_or_key_times_out(monkeypatch):
-    """With no input events, wait_for_click_or_key returns False at timeout."""
-    # Force the path to be "Windows"-ish: if actually on Windows this will
-    # run against the real API (no input in test environment -> timeout).
-    # On non-Windows, the function returns False immediately regardless.
+    """With no input events, wait_for_click_or_key returns False at timeout.
+
+    On macOS in an interactive desktop session this test is unreliable —
+    any real mouse/keyboard activity during the 0.3s window bumps the
+    CGEvent counter and the function returns True. Skip there.
+    """
+    if sys.platform == "darwin":
+        pytest.skip("cannot guarantee a sterile input window on interactive macOS")
     from workflow_recorder.capture.cursor_focus import wait_for_click_or_key
     start = time.monotonic()
     result = wait_for_click_or_key(max_wait_seconds=0.3, poll_interval_ms=50)
     elapsed = time.monotonic() - start
     assert result is False
     if sys.platform == "win32":
-        # Must have spent close to max_wait, give generous slack
         assert elapsed < 1.0
 
 

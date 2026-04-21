@@ -1,0 +1,175 @@
+#!/bin/bash
+# Postinstall script for WorkflowRecorder.pkg
+#
+# Runs after the package payload has been unpacked to /Applications/.
+# Responsibilities:
+#   1. Prompt the user for employee_id / DashScope API key / server URL
+#      via osascript dialogs. (If the user cancels, we skip writing
+#      model_config.json — the daemon's built-in first-run wizard will
+#      ask again at runtime.)
+#   2. Write model_config.json to
+#      ~/Library/Application Support/WorkflowRecorder/.
+#   3. Install the LaunchAgent plist to ~/Library/LaunchAgents/ and
+#      load it so the daemon starts at next login (and now).
+#
+# Exit code: always 0 — failures here should not abort the install
+# (the binary is already in place and the user can re-run setup).
+
+set -u
+
+PKG_ROOT="/Applications/WorkflowRecorder.app"
+TEMPLATE_PLIST="$PKG_ROOT/Contents/Resources/com.workflow-recorder.plist"
+
+# The installer runs as root with environment variables reflecting the
+# *installing* user. $USER / $HOME here are the logged-in user's.
+TARGET_USER="${USER:-$(stat -f '%Su' /dev/console)}"
+TARGET_HOME=$(dscl . -read "/Users/$TARGET_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+if [ -z "$TARGET_HOME" ]; then
+    TARGET_HOME="/Users/$TARGET_USER"
+fi
+
+CONFIG_DIR="$TARGET_HOME/Library/Application Support/WorkflowRecorder"
+CONFIG_FILE="$CONFIG_DIR/model_config.json"
+LOG_DIR="$TARGET_HOME/Library/Logs/WorkflowRecorder"
+AGENT_DIR="$TARGET_HOME/Library/LaunchAgents"
+AGENT_FILE="$AGENT_DIR/com.workflow-recorder.plist"
+
+mkdir -p "$CONFIG_DIR" "$LOG_DIR" "$AGENT_DIR"
+chown -R "$TARGET_USER" \
+    "$TARGET_HOME/Library/Application Support/WorkflowRecorder" \
+    "$LOG_DIR" \
+    "$AGENT_DIR" 2>/dev/null || true
+
+# -------- helper: ask the logged-in user via osascript ------------------
+# Run dialogs AS the logged-in user (not as root) so they appear on
+# their session, with the correct appearance / permissions.
+run_as_user() {
+    sudo -u "$TARGET_USER" /bin/bash -c "$1"
+}
+
+prompt() {
+    local title="$1" default_text="$2" hidden="$3"
+    local hide_arg=""
+    if [ "$hidden" = "yes" ]; then hide_arg="with hidden answer"; fi
+    run_as_user "osascript <<APPLESCRIPT
+try
+    set resp to display dialog \"$title\" default answer \"$default_text\" $hide_arg buttons {\"Cancel\", \"OK\"} default button \"OK\" with title \"Workflow Recorder Setup\"
+    return text returned of resp
+on error number -128
+    return \"__CANCELLED__\"
+end try
+APPLESCRIPT"
+}
+
+json_escape() {
+    python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1" 2>/dev/null
+}
+
+# -------- 1. Collect config --------------------------------------------
+# If a config already exists (reinstall / upgrade), keep it as-is.
+if [ ! -f "$CONFIG_FILE" ]; then
+    EMPLOYEE_ID=$(prompt "Employee ID (员工工号):" "" "no")
+    if [ "$EMPLOYEE_ID" = "__CANCELLED__" ]; then
+        EMPLOYEE_ID=""
+    fi
+    API_KEY=""
+    if [ -n "$EMPLOYEE_ID" ]; then
+        API_KEY=$(prompt "DashScope (百炼) API Key (sk-...):" "" "yes")
+        if [ "$API_KEY" = "__CANCELLED__" ]; then
+            API_KEY=""
+        fi
+    fi
+    SERVER_URL=$(prompt "Server URL (服务端地址):" "http://localhost:8000" "no")
+    if [ "$SERVER_URL" = "__CANCELLED__" ] || [ -z "$SERVER_URL" ]; then
+        SERVER_URL="http://localhost:8000"
+    fi
+
+    EMP_ESCAPED=$(json_escape "$EMPLOYEE_ID")
+    KEY_ESCAPED=$(json_escape "$API_KEY")
+    URL_ESCAPED=$(json_escape "$SERVER_URL")
+
+    cat > "$CONFIG_FILE" <<JSON
+{
+  "employee_id": ${EMP_ESCAPED:-\"\"},
+  "model_presets": {
+    "qwen": {
+      "name": "Qwen3.5-Plus (Alibaba DashScope)",
+      "model": "qwen3.5-plus",
+      "base_url": "https://coding.dashscope.aliyuncs.com/v1",
+      "openai_api_key": ${KEY_ESCAPED:-\"\"},
+      "detail": "low",
+      "max_tokens": 1000,
+      "temperature": 0.1,
+      "rate_limit_rpm": 30
+    }
+  },
+  "active_preset": "qwen",
+  "analysis": {
+    "retry_attempts": 3,
+    "retry_backoff_base": 2.0
+  },
+  "capture": {
+    "interval_seconds": 1
+  },
+  "server": {
+    "enabled": true,
+    "url": ${URL_ESCAPED},
+    "api_key": "",
+    "buffer_path": "./logs/push_buffer.jsonl"
+  }
+}
+JSON
+    chown "$TARGET_USER" "$CONFIG_FILE"
+fi
+
+# -------- 2. Install LaunchAgent plist (but don't load it yet) ---------
+if [ -f "$TEMPLATE_PLIST" ]; then
+    sed -e "s|__HOME__|${TARGET_HOME}|g" \
+        -e "s|__BUNDLE__|${PKG_ROOT}|g" \
+        -e "s|__CONFIG__|${CONFIG_FILE}|g" \
+        "$TEMPLATE_PLIST" > "$AGENT_FILE"
+    chown "$TARGET_USER" "$AGENT_FILE"
+    chmod 644 "$AGENT_FILE"
+fi
+
+TARGET_UID=$(id -u "$TARGET_USER")
+
+# Always unload any previous version so an upgrade picks up the new plist.
+run_as_user "launchctl bootout gui/${TARGET_UID}/com.workflow-recorder" 2>/dev/null || true
+
+# Only auto-start the agent when the config has everything the daemon
+# needs to run non-interactively. Loading an agent against an incomplete
+# config would wedge it into a restart-throttle loop because the
+# built-in wizard can't prompt without a TTY.
+CONFIG_READY="no"
+if [ -f "$CONFIG_FILE" ]; then
+    EMP_OK=$(python3 -c "import json,sys;
+try:
+    d=json.load(open(sys.argv[1]))
+    e=(d.get('employee_id') or '').strip()
+    a=d.get('active_preset')
+    presets=d.get('model_presets') or {}
+    if a and a in presets:
+        k=(presets[a].get('openai_api_key') or '').strip()
+    else:
+        k=((d.get('analysis') or {}).get('openai_api_key') or '').strip()
+    print('ok' if (e and k) else 'incomplete')
+except Exception:
+    print('error')" "$CONFIG_FILE" 2>/dev/null)
+    if [ "$EMP_OK" = "ok" ]; then CONFIG_READY="yes"; fi
+fi
+
+if [ "$CONFIG_READY" = "yes" ]; then
+    run_as_user "launchctl bootstrap gui/${TARGET_UID} '$AGENT_FILE'" 2>/dev/null || \
+        run_as_user "launchctl load '$AGENT_FILE'" 2>/dev/null || true
+    REMINDER='Workflow Recorder is installed and running.\n\nmacOS will ask for Screen Recording permission the first time a capture is attempted. Without it, screenshots will be blank.\n\nOptional: grant Accessibility access (System Settings → Privacy & Security → Accessibility) for focus-rectangle overlays.\n\nLogs: ~/Library/Logs/WorkflowRecorder/'
+else
+    REMINDER='Workflow Recorder is installed but not started (employee ID or API key was not provided).\n\nTo finish setup:\n  1. Edit ~/Library/Application Support/WorkflowRecorder/model_config.json\n  2. Run:  launchctl bootstrap gui/'"$TARGET_UID"' ~/Library/LaunchAgents/com.workflow-recorder.plist\n\nOr open Terminal and run the app once interactively:\n  /Applications/WorkflowRecorder.app/Contents/MacOS/workflow-recorder -c ~/Library/Application\\ Support/WorkflowRecorder/model_config.json'
+fi
+
+# -------- 3. First-run permission reminder -----------------------------
+run_as_user "osascript <<APPLESCRIPT
+display dialog \"$REMINDER\" buttons {\"OK\"} default button \"OK\" with title \"Workflow Recorder\"
+APPLESCRIPT" 2>/dev/null || true
+
+exit 0

@@ -130,7 +130,7 @@ def _print_summary(daemon) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="workflow-recorder",
-        description="Record Windows desktop captures and upload for server-side analysis",
+        description="Record desktop captures (Windows/macOS) and upload for server-side analysis",
     )
     parser.add_argument(
         "-c", "--config",

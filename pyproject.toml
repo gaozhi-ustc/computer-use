@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "workflow-recorder"
-version = "0.4.10"
-description = "Windows daemon that captures screenshots and analyzes employee workflows via GPT vision"
+version = "0.5.0"
+description = "Cross-platform (Windows/macOS) daemon that captures screenshots and analyzes employee workflows via vision LLM"
 requires-python = ">=3.9"
 dependencies = [
     "mss>=9.0",
@@ -18,6 +18,10 @@ dependencies = [
     "psutil>=5.9",
     "httpx>=0.27",
     "pywin32>=306; sys_platform == 'win32'",
+    "pyobjc-core>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
