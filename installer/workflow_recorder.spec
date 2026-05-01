@@ -36,8 +36,12 @@ common_hidden = [
 ]
 
 common_excludes = [
-    'tkinter', 'matplotlib', 'test', 'unittest',
+    'tkinter', 'matplotlib',
     'pytest', 'pytest_asyncio', '_pytest',
+    # NOTE: do NOT exclude 'unittest' or 'test' — scipy.fft (pulled in by
+    # imagehash.phash) lazily imports them during its module init path.
+    # Stripping them breaks drop_idle_duplicate_frames silently with
+    # "No module named 'unittest'" warnings in production.
 ]
 
 # ── Analysis: main CLI ─────────────────────────────────────────────────

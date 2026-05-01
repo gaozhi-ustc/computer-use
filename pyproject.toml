@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "workflow-recorder"
-version = "0.5.0"
+version = "0.5.1"
 description = "Cross-platform (Windows/macOS) daemon that captures screenshots and analyzes employee workflows via vision LLM"
 requires-python = ">=3.9"
 dependencies = [
